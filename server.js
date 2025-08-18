@@ -114,6 +114,8 @@ app.use('/api/surveys', require('./routes/surveys'));
 app.use('/api/fake-news', require('./routes/fakeNews'));
 app.use('/api/public', require('./routes/publicRegistration'));
 app.use('/api/constitution', require('./routes/constitution'));
+app.use('/api/constitution-downloads', require('./routes/constitutionDownloads'));
+app.use('/api/user', require('./routes/user'));
 
 // Root endpoint
 app.get('/', (req, res) => {

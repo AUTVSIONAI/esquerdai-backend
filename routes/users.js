@@ -74,9 +74,14 @@ router.put('/profile', authenticateUser, async (req, res) => {
 });
 
 // Get user statistics
-router.get('/stats', authenticateUser, async (req, res) => {
+router.get('/:userId/stats', authenticateUser, async (req, res) => {
   try {
-    const userId = req.user.id;
+    const { userId } = req.params;
+    
+    // Verificar se o usuário pode acessar estes dados
+    if (req.user.id !== userId && !req.user.is_admin) {
+      return res.status(403).json({ error: 'Acesso negado' });
+    }
 
     // Get check-ins count
     const { count: checkinsCount } = await supabase

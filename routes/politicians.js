@@ -6,33 +6,15 @@ const router = express.Router();
 // Listar políticos
 router.get('/', async (req, res) => {
   try {
-    console.log('🔍 Iniciando busca de políticos...');
     const { state, party, position, search, limit = 12, page = 1 } = req.query;
     
     const offset = (parseInt(page) - 1) * parseInt(limit);
     
-    console.log('🔍 Parâmetros:', { state, party, position, search, limit, page, offset });
-    
-    // Primeiro, vamos testar uma consulta simples
-    console.log('🔍 Testando consulta simples...');
-    const { data: testData, error: testError } = await supabase
-      .from('politicians')
-      .select('id, name')
-      .limit(1);
-    
-    if (testError) {
-      console.error('❌ Erro na consulta de teste:', testError);
-      return res.status(500).json({ 
-        error: 'Erro na consulta de teste', 
-        details: testError.message 
-      });
-    }
-    
-    console.log('✅ Consulta de teste bem-sucedida:', testData);
-    
     let query = supabase
       .from('politicians')
       .select('*', { count: 'exact' })
+      .eq('is_active', true)
+      .eq('is_approved', true)
       .order('name')
       .range(offset, offset + parseInt(limit) - 1);
 
@@ -50,18 +32,15 @@ router.get('/', async (req, res) => {
       query = query.or(`name.ilike.%${search}%,short_bio.ilike.%${search}%`);
     }
 
-    console.log('🔍 Executando consulta principal...');
     const { data: politicians, error, count: totalCount } = await query;
 
     if (error) {
-      console.error('❌ Erro ao buscar políticos:', error);
+      console.error('Erro ao buscar políticos:', error);
       return res.status(500).json({ 
         error: 'Erro ao buscar políticos', 
         details: error.message 
       });
     }
-
-    console.log('✅ Consulta bem-sucedida. Políticos encontrados:', politicians?.length || 0);
 
     // Calcular informações de paginação
     const totalPages = Math.ceil((totalCount || 0) / parseInt(limit));
