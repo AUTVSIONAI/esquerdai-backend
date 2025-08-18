@@ -33,6 +33,7 @@
     "test": "echo 'No tests specified'"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.55.0",
     "axios": "^1.6.7",
     "bcryptjs": "3.0.2",
     "cors": "^2.8.5",
