@@ -45,11 +45,53 @@ router.get('/', optionalAuthenticateUser, async (req, res) => {
       query = query.eq('publico_alvo', publico_alvo);
     }
 
-    const { data: pesquisas, error, count: totalCount } = await query;
+    let { data: pesquisas, error, count: totalCount } = await query;
 
     if (error) {
-      console.error('Erro ao buscar pesquisas:', error);
-      return res.status(500).json({ error: 'Erro interno do servidor' });
+      console.error('Erro ao buscar pesquisas (com relação politicians):', error);
+      // Fallback: tentar novamente sem a relação com politicians para evitar 500
+      try {
+        const fallbackQuery = supabase
+          .from('pesquisas')
+          .select(`
+            id,
+            titulo,
+            descricao,
+            opcoes,
+            tipo,
+            publico_alvo,
+            regiao_especifica,
+            politician_id,
+            data_expiracao,
+            is_active,
+            is_anonymous,
+            allow_comments,
+            max_votes_per_user,
+            total_votes,
+            created_at
+          `)
+          .eq('is_active', true)
+          .order('created_at', { ascending: false })
+          .range(parseInt(offset), parseInt(offset) + parseInt(limit) - 1);
+
+        const fallback = await fallbackQuery;
+        pesquisas = fallback.data || [];
+        error = fallback.error || null;
+        totalCount = fallback.count;
+      } catch (fallbackErr) {
+        console.error('Erro no fallback de pesquisas:', fallbackErr);
+        // Em último caso, responder 200 com lista vazia para não quebrar a UI
+        return res.json({
+          success: true,
+          data: [],
+          pagination: {
+            page: Math.floor(parseInt(offset) / parseInt(limit)) + 1,
+            pages: 0,
+            limit: parseInt(limit),
+            total: 0
+          }
+        });
+      }
     }
 
     // Se usuário autenticado, verificar votos

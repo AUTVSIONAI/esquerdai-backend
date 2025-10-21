@@ -112,8 +112,29 @@ const authenticateUser = async (req, res, next) => {
       .single();
     
     if (dbError || !dbUser) {
-      console.error('❌ Usuário não encontrado na tabela users:', dbError?.message);
-      return res.status(401).json({ error: 'Usuário não encontrado no sistema' });
+      console.log('⚠️ Usuário não encontrado na tabela users, tentando criar registro...');
+      const newUser = {
+        auth_id: user.id,
+        email: user.email,
+        role: 'user',
+        username: user.email.split('@')[0],
+        full_name: user.user_metadata?.full_name || user.email.split('@')[0],
+        created_at: new Date().toISOString()
+      };
+
+      const { data: insertedUser, error: insertError } = await supabase
+        .from('users')
+        .insert(newUser)
+        .select('*')
+        .single();
+
+      if (insertError || !insertedUser) {
+        console.error('❌ Falha ao criar usuário na tabela users:', insertError?.message);
+        return res.status(401).json({ error: 'Usuário não encontrado no sistema' });
+      }
+
+      dbUser = insertedUser;
+      console.log('✅ Usuário criado na tabela users:', dbUser.email);
     }
     
     console.log('✅ Usuário encontrado na tabela users:', dbUser.email);

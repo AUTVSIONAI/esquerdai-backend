@@ -1,5 +1,15 @@
 const express = require('express');
-const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+let stripe = null;
+try {
+  if (process.env.STRIPE_SECRET_KEY) {
+    stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+  } else {
+    console.warn('⚠️ STRIPE_SECRET_KEY ausente; rotas de pagamentos ficarão desativadas.');
+  }
+} catch (e) {
+  console.warn('⚠️ Stripe não inicializado:', e.message);
+  stripe = null;
+}
 const { supabase } = require('../config/supabase');
 const router = express.Router();
 
@@ -67,6 +77,7 @@ const PLANS = {
 
 // Endpoint para criar sessão de checkout
 router.post('/checkout', authenticateUser, async (req, res) => {
+  if (!stripe) return res.status(503).json({ error: 'Pagamentos indisponíveis no ambiente de desenvolvimento' });
   try {
     const { planId } = req.body;
     const userId = req.user.id;
@@ -123,6 +134,7 @@ router.post('/checkout', authenticateUser, async (req, res) => {
 
 // Webhook do Stripe
 router.post('/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
+  if (!stripe) return res.status(503).send('Stripe não configurado');
   const sig = req.headers['stripe-signature'];
   let event;
 

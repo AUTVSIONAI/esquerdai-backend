@@ -49,7 +49,9 @@ const corsOptions = {
     'https://direitai-backend.vercel.app',
     'http://localhost:5120',
     'http://localhost:5121',
-    'http://localhost:5122'
+    'http://localhost:5122',
+    'http://localhost:5123',
+    'http://localhost:5124'
   ],
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
