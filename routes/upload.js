@@ -3,27 +3,14 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const { authenticateUser, authenticateAdmin } = require('../middleware/auth');
+const { supabase } = require('../config/supabase');
 const router = express.Router();
 
-// Configurar multer para upload de arquivos
-const storage = multer.diskStorage({
-  destination: function (req, file, cb) {
-    const uploadPath = path.join(__dirname, '../uploads');
-    
-    // Criar diretório se não existir
-    if (!fs.existsSync(uploadPath)) {
-      fs.mkdirSync(uploadPath, { recursive: true });
-    }
-    
-    cb(null, uploadPath);
-  },
-  filename: function (req, file, cb) {
-    // Gerar nome único para o arquivo
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-    const extension = path.extname(file.originalname);
-    cb(null, file.fieldname + '-' + uniqueSuffix + extension);
-  }
-});
+// Definir bucket de storage (crie no Supabase e deixe como público)
+const UPLOAD_BUCKET = process.env.SUPABASE_UPLOAD_BUCKET || 'uploads';
+
+// Configurar multer para upload em memória (compatível com Vercel)
+const storage = multer.memoryStorage();
 
 // Filtro para aceitar apenas imagens
 const fileFilter = (req, file, cb) => {
@@ -45,102 +32,137 @@ const upload = multer({
   }
 });
 
-// Middleware para servir arquivos estáticos
-router.use('/files', express.static(path.join(__dirname, '../uploads')));
+// Em desenvolvimento local, servir arquivos estáticos do diretório uploads (fallback)
+if (process.env.VERCEL !== '1' && process.env.NODE_ENV !== 'production') {
+  router.use('/files', express.static(path.join(__dirname, '../uploads')));
+}
+
+// Helper: gerar nome único e caminho para storage
+function generateStoragePath(originalName, prefix) {
+  const extension = path.extname(originalName) || '';
+  const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
+  const safePrefix = prefix ? `${prefix.replace(/[^a-zA-Z0-9/_-]/g, '')}/` : '';
+  return `${safePrefix}${uniqueSuffix}${extension}`;
+}
+
+// Helper: fazer upload para Supabase Storage
+async function uploadToSupabaseStorage(fileBuffer, contentType, originalName, prefix) {
+  const storagePath = generateStoragePath(originalName, prefix);
+  const { data, error } = await supabase.storage
+    .from(UPLOAD_BUCKET)
+    .upload(storagePath, fileBuffer, {
+      contentType,
+      upsert: true
+    });
+
+  if (error) {
+    throw new Error(`Falha ao enviar para storage: ${error.message}`);
+  }
+
+  const { data: publicData } = supabase.storage
+    .from(UPLOAD_BUCKET)
+    .getPublicUrl(storagePath);
+
+  const publicUrl = publicData?.publicUrl || null;
+  return { storagePath, publicUrl };
+}
 
 // Upload de foto de político
-router.post('/politician-photo', authenticateUser, authenticateAdmin, upload.single('photo'), (req, res) => {
+router.post('/politician-photo', authenticateUser, authenticateAdmin, upload.single('photo'), async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ error: 'Nenhum arquivo foi enviado' });
     }
 
-    // URL do arquivo
-    const fileUrl = `/api/upload/files/${req.file.filename}`;
-    
+    const { buffer, mimetype, originalname, size } = req.file;
+    const { storagePath, publicUrl } = await uploadToSupabaseStorage(buffer, mimetype, originalname, 'politicians');
+
     res.json({
       success: true,
       message: 'Foto do político enviada com sucesso',
       data: {
-        filename: req.file.filename,
-        originalName: req.file.originalname,
-        size: req.file.size,
-        url: fileUrl
+        filename: path.basename(storagePath),
+        originalName: originalname,
+        size,
+        url: publicUrl
       }
     });
   } catch (error) {
     console.error('Erro no upload da foto do político:', error);
-    res.status(500).json({ error: 'Erro interno do servidor' });
+    res.status(500).json({ error: 'Erro interno do servidor', message: error.message });
   }
 });
 
 // Upload de imagem de produto
-router.post('/product-image', authenticateUser, authenticateAdmin, upload.single('image'), (req, res) => {
+router.post('/product-image', authenticateUser, authenticateAdmin, upload.single('image'), async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ error: 'Nenhum arquivo foi enviado' });
     }
 
-    // URL do arquivo
-    const fileUrl = `/api/upload/files/${req.file.filename}`;
-    
+    const { buffer, mimetype, originalname, size } = req.file;
+    const { storagePath, publicUrl } = await uploadToSupabaseStorage(buffer, mimetype, originalname, 'products');
+
     res.json({
       success: true,
       message: 'Imagem do produto enviada com sucesso',
       data: {
-        filename: req.file.filename,
-        originalName: req.file.originalname,
-        size: req.file.size,
-        url: fileUrl
+        filename: path.basename(storagePath),
+        originalName: originalname,
+        size,
+        url: publicUrl
       }
     });
   } catch (error) {
     console.error('Erro no upload da imagem do produto:', error);
-    res.status(500).json({ error: 'Erro interno do servidor' });
+    res.status(500).json({ error: 'Erro interno do servidor', message: error.message });
   }
 });
 
-// Upload genérico de imagem
-router.post('/image', authenticateUser, upload.single('image'), (req, res) => {
+// Upload genérico de imagem (blog)
+router.post('/image', authenticateUser, upload.single('image'), async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ error: 'Nenhum arquivo foi enviado' });
     }
 
-    // URL do arquivo
-    const fileUrl = `/api/upload/files/${req.file.filename}`;
-    
+    const { buffer, mimetype, originalname, size } = req.file;
+    const { storagePath, publicUrl } = await uploadToSupabaseStorage(buffer, mimetype, originalname, 'blog');
+
     res.json({
       success: true,
       message: 'Imagem enviada com sucesso',
       data: {
-        filename: req.file.filename,
-        originalName: req.file.originalname,
-        size: req.file.size,
-        url: fileUrl
+        filename: path.basename(storagePath),
+        originalName: originalname,
+        size,
+        url: publicUrl
       }
     });
   } catch (error) {
     console.error('Erro no upload da imagem:', error);
-    res.status(500).json({ error: 'Erro interno do servidor' });
+    res.status(500).json({ error: 'Erro interno do servidor', message: error.message });
   }
 });
 
-// Deletar arquivo
-router.delete('/files/:filename', authenticateUser, authenticateAdmin, (req, res) => {
+// Deletar arquivo do Supabase Storage
+router.delete('/files/:filename', authenticateUser, authenticateAdmin, async (req, res) => {
   try {
     const { filename } = req.params;
-    const filePath = path.join(__dirname, '../uploads', filename);
-    
-    if (fs.existsSync(filePath)) {
-      fs.unlinkSync(filePath);
-      res.json({ success: true, message: 'Arquivo deletado com sucesso' });
-    } else {
-      res.status(404).json({ error: 'Arquivo não encontrado' });
+    if (!filename) return res.status(400).json({ error: 'Filename é obrigatório' });
+
+    const { data, error } = await supabase.storage
+      .from(UPLOAD_BUCKET)
+      .remove([filename]);
+
+    if (error) {
+      return res.status(500).json({ error: 'Erro ao deletar arquivo no storage', message: error.message });
     }
+
+    res.json({ success: true, message: 'Arquivo deletado com sucesso' });
   } catch (error) {
     console.error('Erro ao deletar arquivo:', error);
-    res.status(500).json({ error: 'Erro interno do servidor' });
+    res.status(500).json({ error: 'Erro interno do servidor', message: error.message });
   }
 });
 
@@ -153,7 +175,7 @@ router.use((error, req, res, next) => {
     return res.status(400).json({ error: error.message });
   }
   
-  if (error.message.includes('Tipo de arquivo não permitido')) {
+  if (error.message && error.message.includes('Tipo de arquivo não permitido')) {
     return res.status(400).json({ error: error.message });
   }
   
