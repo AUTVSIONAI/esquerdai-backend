@@ -21,11 +21,17 @@ function isValidUUID(str) {
   return uuidRegex.test(str);
 }
 
-// Helper: construir URL absoluta para imagens de upload com base no host
+// Helper: construir URL absoluta para imagens com protocolo correto
 function getAbsoluteImageUrlBackend(imageUrl, req) {
   if (!imageUrl) return null;
   if (imageUrl.startsWith('http://') || imageUrl.startsWith('https://')) return imageUrl;
-  const baseApi = `${req.protocol}://${req.get('host')}/api`;
+
+  // Respeita proxies (Vercel) e força https quando possível
+  const forwardedProto = (req.headers['x-forwarded-proto'] || '').split(',')[0];
+  const proto = forwardedProto || (req.secure ? 'https' : req.protocol) || 'https';
+  const host = req.get('host');
+  const baseApi = `${proto}://${host}/api`;
+
   if (imageUrl.startsWith('/api/upload/files/')) {
     const relativePath = imageUrl.replace('/api', '');
     return `${baseApi}${relativePath}`;

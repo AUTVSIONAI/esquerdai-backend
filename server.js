@@ -38,6 +38,9 @@ global.supabase = supabase;
 // cleanOldLogs();
 
 const app = express();
+
+// Confia no proxy (Vercel/NGINX) para protocolo correto
+app.set('trust proxy', 1);
 const PORT = process.env.PORT || 5120;
 
 // Middleware
