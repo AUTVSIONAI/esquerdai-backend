@@ -6,33 +6,51 @@ const router = express.Router();
 // Get all events
 router.get('/', async (req, res) => {
   try {
-    const { city, state, status, limit = 50 } = req.query;
+    const { city, state, status, page = 1, limit = 20 } = req.query;
 
+    const limitNum = parseInt(limit);
+    const pageNum = parseInt(page);
+    const fromIndex = (pageNum - 1) * limitNum;
+    const toIndex = fromIndex + limitNum - 1;
+
+    // Contagem total com filtros (head=true para não retornar dados)
+    let countQuery = supabase
+      .from('events')
+      .select('*', { count: 'exact', head: true });
+
+    if (city) countQuery = countQuery.eq('city', city);
+    if (state) countQuery = countQuery.eq('state', state);
+    if (status) countQuery = countQuery.eq('status', status);
+
+    const { count, error: countError } = await countQuery;
+    if (countError) {
+      console.error('Count events error:', countError);
+    }
+
+    // Consulta paginada com ordenação segura
     let query = supabase
       .from('events')
       .select('*')
-      .order('date', { ascending: true })
-      .limit(parseInt(limit));
+      .order('id', { ascending: false })
+      .range(fromIndex, toIndex);
 
-    if (city) {
-      query = query.eq('city', city);
-    }
-
-    if (state) {
-      query = query.eq('state', state);
-    }
-
-    if (status) {
-      query = query.eq('status', status);
-    }
+    if (city) query = query.eq('city', city);
+    if (state) query = query.eq('state', state);
+    if (status) query = query.eq('status', status);
 
     const { data: events, error } = await query;
 
     if (error) {
+      console.error('Get events error:', error);
       return res.status(400).json({ error: error.message });
     }
 
-    res.json({ events });
+    res.json({
+      events: events || [],
+      total: typeof count === 'number' ? count : (events?.length || 0),
+      totalPages: typeof count === 'number' ? Math.ceil(count / limitNum) : 1,
+      currentPage: pageNum
+    });
   } catch (error) {
     console.error('Get events error:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -321,8 +339,8 @@ router.post('/', authenticateUser, authenticateAdmin, async (req, res) => {
 router.put('/:id', authenticateUser, async (req, res) => {
   try {
     // Check if user is admin
-    if (!req.user.is_admin) {
-      return res.status(403).json({ error: 'Admin access required' });
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Acesso negado' });
     }
 
     const { id } = req.params;
@@ -350,8 +368,8 @@ router.put('/:id', authenticateUser, async (req, res) => {
 router.delete('/:id', authenticateUser, async (req, res) => {
   try {
     // Check if user is admin
-    if (!req.user.is_admin) {
-      return res.status(403).json({ error: 'Admin access required' });
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Acesso negado' });
     }
 
     const { id } = req.params;

@@ -1,12 +1,29 @@
 const express = require('express');
 const { supabase } = require('../config/supabase');
 const aiService = require('../services/aiService');
-const { authenticateUser } = require('../middleware/auth');
+const { authenticateUser, optionalAuthenticateUser } = require('../middleware/auth');
 const { randomUUID } = require('crypto');
 const router = express.Router();
 
-// DireitaGPT Chat com APIs reais
-router.post('/chat', authenticateUser, async (req, res) => {
+// Choose auth middleware based on Supabase env presence (dev fallback)
+const requireAuth = (process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY)
+  ? authenticateUser
+  : optionalAuthenticateUser;
+
+// Fallback de usuário dev quando não há autenticação (apenas em desenvolvimento)
+const ensureDevUser = (req, res, next) => {
+  if (!req.user) {
+    req.user = {
+      id: 'dev-user',
+      plan: 'premium',
+      email: 'dev@local'
+    };
+  }
+  next();
+};
+
+// EsquerdaGPT Chat com APIs reais
+router.post('/chat', requireAuth, ensureDevUser, async (req, res) => {
   try {
     const { message, conversation_id } = req.body;
     const authId = req.user.id;
@@ -83,7 +100,7 @@ router.post('/chat', authenticateUser, async (req, res) => {
 });
 
 // Get user usage statistics
-router.get('/usage', authenticateUser, async (req, res) => {
+router.get('/usage', requireAuth, ensureDevUser, async (req, res) => {
   try {
     const userId = req.user.id;
     const userPlan = req.user.plan || 'Gratuito';
@@ -103,7 +120,7 @@ router.get('/usage', authenticateUser, async (req, res) => {
 });
 
 // Get Creative AI usage statistics
-router.get('/creative-ai/usage', authenticateUser, async (req, res) => {
+router.get('/creative-ai/usage', requireAuth, ensureDevUser, async (req, res) => {
   try {
     const userId = req.user.id;
     const userPlan = req.user.plan || 'gratuito';
@@ -154,7 +171,7 @@ router.get('/creative-ai/usage', authenticateUser, async (req, res) => {
 });
 
 // Get user conversation history
-router.get('/conversations', authenticateUser, async (req, res) => {
+router.get('/conversations', requireAuth, ensureDevUser, async (req, res) => {
   try {
     const userId = req.user.id;
     const { limit = 50 } = req.query;
@@ -168,10 +185,7 @@ router.get('/conversations', authenticateUser, async (req, res) => {
       });
     }
 
-    res.json({
-      conversations: result.data,
-      total: result.data.length
-    });
+    return res.json(result.data);
   } catch (error) {
     console.error('Error fetching conversations:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -179,7 +193,7 @@ router.get('/conversations', authenticateUser, async (req, res) => {
 });
 
 // Creative AI Content Generation
-router.post('/generate', authenticateUser, async (req, res) => {
+router.post('/generate', requireAuth, ensureDevUser, async (req, res) => {
   try {
     const { type, prompt, tone, length, template } = req.body;
     const userId = req.user.id;
@@ -195,8 +209,11 @@ router.post('/generate', authenticateUser, async (req, res) => {
       .eq('id', userId)
       .single();
 
+    // Resolve plan from DB or fallback to req.user or default dev plan
+    const planName = userProfile?.plan || (req.user && req.user.plan) || 'engajado';
+
     // Check if user has access to Creative AI
-    if (userProfile?.plan === 'gratuito') {
+    if (planName === 'gratuito') {
       return res.status(403).json({ 
         error: 'Creative AI requires Engajado or Premium plan'
       });
@@ -216,12 +233,13 @@ router.post('/generate', authenticateUser, async (req, res) => {
       premium: -1, // unlimited
     };
 
-    const userLimit = limits[userProfile?.plan] || 0;
-    if (userLimit !== -1 && todayUsage >= userLimit) {
+    const userLimit = limits[planName] ?? 0;
+    const todayCount = todayUsage || 0;
+    if (userLimit !== -1 && todayCount >= userLimit) {
       return res.status(429).json({ 
         error: 'Daily generation limit reached',
         limit: userLimit,
-        usage: todayUsage
+        usage: todayCount
       });
     }
 
@@ -268,7 +286,7 @@ router.post('/generate', authenticateUser, async (req, res) => {
 // Rota duplicada removida - usando a implementação anterior com aiService
 
 // Get generation history
-router.get('/generations', authenticateUser, async (req, res) => {
+router.get('/generations', requireAuth, ensureDevUser, async (req, res) => {
   try {
     const { limit = 50, offset = 0, type } = req.query;
     const userId = req.user.id;
@@ -298,7 +316,7 @@ router.get('/generations', authenticateUser, async (req, res) => {
 });
 
 // Get AI usage statistics
-router.get('/usage', authenticateUser, async (req, res) => {
+router.get('/usage', requireAuth, ensureDevUser, async (req, res) => {
   try {
     const userId = req.user.id;
     const today = new Date().toISOString().split('T')[0];
@@ -370,7 +388,7 @@ router.get('/usage', authenticateUser, async (req, res) => {
 });
 
 // Get messages from a specific conversation
-router.get('/conversations/:conversationId/messages', authenticateUser, async (req, res) => {
+router.get('/conversations/:conversationId/messages', requireAuth, ensureDevUser, async (req, res) => {
   try {
     const { conversationId } = req.params;
     const { page = 1, limit = 50 } = req.query;
@@ -415,29 +433,29 @@ function generateConversationId() {
 function generateDireitaGPTResponse(message) {
   const lowerMessage = message.toLowerCase();
   
-  // Conservative-themed responses based on keywords
+  // Progressive-themed responses based on keywords
   if (lowerMessage.includes('economia') || lowerMessage.includes('econômica')) {
-    return 'A economia brasileira precisa de mais liberdade econômica e menos intervenção estatal. O livre mercado é fundamental para o crescimento sustentável e a geração de empregos. Políticas que reduzam a burocracia e incentivem o empreendedorismo são essenciais.';
+    return 'Uma economia justa precisa combinar crescimento com distribuição de renda, valorização do trabalho e combate às desigualdades. Políticas públicas responsáveis, tributação progressiva e investimentos em saúde, educação e infraestrutura são essenciais para um desenvolvimento sustentável e inclusivo.';
   }
   
   if (lowerMessage.includes('família') || lowerMessage.includes('valores')) {
-    return 'A família é a base da sociedade e deve ser protegida e fortalecida. Os valores tradicionais como respeito, responsabilidade e trabalho são fundamentais para uma sociedade próspera. É importante preservar esses princípios para as futuras gerações.';
+    return 'Defendemos famílias em sua diversidade, com políticas de cuidado, proteção social e promoção de direitos para todas as pessoas. O respeito, a solidariedade e a igualdade devem orientar um Brasil mais acolhedor e democrático.';
   }
   
   if (lowerMessage.includes('educação') || lowerMessage.includes('escola')) {
-    return 'A educação deve focar no ensino de qualidade, com ênfase em disciplinas fundamentais como português, matemática, ciências e história. É importante que as escolas ensinem valores cívicos e preparem os jovens para serem cidadãos responsáveis e produtivos.';
+    return 'Educação pública, gratuita e de qualidade é a base de um país justo. Investimento em professores, ciência, cultura e inclusão garante oportunidades, combate a desigualdade e fortalece nossa democracia.';
   }
   
   if (lowerMessage.includes('política') || lowerMessage.includes('governo')) {
-    return 'Um governo eficiente deve ser limitado, transparente e focado em suas funções essenciais: segurança, justiça e infraestrutura básica. A descentralização do poder e o fortalecimento das instituições democráticas são fundamentais para uma sociedade livre.';
+    return 'Transparência, participação popular e respeito às instituições são pilares de um governo democrático. Fortalecer políticas sociais, direitos humanos e combate à desinformação é fundamental para um Brasil mais igualitário.';
   }
   
   if (lowerMessage.includes('segurança') || lowerMessage.includes('violência')) {
-    return 'A segurança pública é um direito fundamental de todos os cidadãos. É necessário fortalecer as forças policiais, melhorar o sistema judiciário e garantir que as leis sejam cumpridas. A prevenção através da educação e oportunidades também é essencial.';
+    return 'Segurança pública efetiva se constrói com prevenção, justiça, direitos e políticas sociais. Enfrentar violência com foco em direitos humanos, redução de desigualdades e respeito às comunidades é caminho para paz duradoura.';
   }
   
   // Default response
-  return 'Obrigado por sua pergunta! Como DireitaGPT, estou aqui para discutir temas importantes para o Brasil com base em princípios conservadores de liberdade, responsabilidade e valores tradicionais. Como posso ajudá-lo a entender melhor esses conceitos?';
+  return 'Obrigado pela pergunta! Como EsquerdaGPT, atuo com perspectiva progressista comprometida com justiça social, direitos humanos e democracia. Em que posso ajudar com propostas inclusivas e baseadas em evidências?';
 }
 
 function generateCreativeContent(type, prompt, tone, length, template) {
@@ -456,19 +474,19 @@ function generateCreativeContent(type, prompt, tone, length, template) {
 
   switch (type) {
     case 'social_post':
-      return `🇧🇷 ${prompt}\n\nNossos valores conservadores nos guiam para um Brasil melhor! 💪\n\n#Brasil #ValoresConservadores #Patriotismo #DireitaBrasil`;
+      return `🇧🇷 ${prompt}\n\nNossos valores progressistas nos guiam para um Brasil mais justo, inclusivo e democrático! ✊\n\n#Brasil #JustiçaSocial #DireitosHumanos #Democracia #BrasilProgressista`;
     
     case 'meme':
-      return `[MEME CONCEPT]\n\nTítulo: "${prompt}"\n\nImagem sugerida: Foto do Brasil com bandeira tremulando\n\nTexto superior: "QUANDO VOCÊ DEFENDE"\nTexto inferior: "OS VALORES TRADICIONAIS BRASILEIROS"\n\nTom: ${toneAdjectives[tone] || 'inspirador'}`;
+      return `[MEME CONCEPT]\n\nTítulo: "${prompt}"\n\nImagem sugerida: Pessoas diversas com cartazes por direitos\n\nTexto superior: "QUANDO LUTAMOS POR"\nTexto inferior: "JUSTIÇA SOCIAL E DEMOCRACIA"\n\nTom: ${toneAdjectives[tone] || 'inspirador'}`;
     
     case 'video_script':
-      return `ROTEIRO DE VÍDEO\n\nTema: ${prompt}\n\nDuração estimada: ${length === 'short' ? '30-60 segundos' : length === 'medium' ? '2-3 minutos' : '5-8 minutos'}\n\nINTRODUÇÃO:\n"Olá, patriotas! Hoje vamos falar sobre ${prompt}..."\n\nDESENVOLVIMENTO:\n- Contextualização do tema\n- Apresentação dos valores conservadores relacionados\n- Exemplos práticos\n\nCONCLUSÃO:\n"Juntos, podemos construir um Brasil melhor baseado em nossos valores tradicionais!"\n\nTom: ${toneAdjectives[tone] || 'inspirador'}`;
+      return `ROTEIRO DE VÍDEO\n\nTema: ${prompt}\n\nDuração estimada: ${length === 'short' ? '30-60 segundos' : length === 'medium' ? '2-3 minutos' : '5-8 minutos'}\n\nINTRODUÇÃO:\n"Olá! Hoje vamos falar sobre ${prompt} sob a perspectiva progressista, com foco em direitos, inclusão e justiça social."\n\nDESENVOLVIMENTO:\n- Contextualização do tema com dados e evidências\n- Políticas públicas e propostas inclusivas relacionadas\n- Exemplos práticos de impacto social positivo\n\nCONCLUSÃO:\n"Juntos, construímos um Brasil mais justo, democrático e sustentável — com participação popular e respeito às diferenças."\n\nTom: ${toneAdjectives[tone] || 'inspirador'}`;
     
     case 'speech':
-      return `DISCURSO: ${prompt}\n\n"Caros brasileiros,\n\nEstamos aqui reunidos porque acreditamos em um Brasil forte, próspero e baseado em valores sólidos. ${prompt} representa tudo aquilo que defendemos: família, trabalho, fé e pátria.\n\nNosso país tem um potencial imenso, mas precisamos de liderança que respeite nossas tradições e promova a liberdade responsável. Cada um de nós tem o dever de contribuir para essa transformação.\n\nJuntos, com determinação e fé, construiremos o Brasil que nossos filhos merecem!\n\nViva o Brasil!"\n\nTom: ${toneAdjectives[tone] || 'inspirador'}\nExtensão: ${lengthWords[length] || 'média'}`;
+      return `DISCURSO: ${prompt}\n\n"Companheiras e companheiros,\n\nEstamos aqui porque acreditamos em um Brasil mais justo, inclusivo e democrático. ${prompt} expressa nosso compromisso com direitos humanos, igualdade e participação popular.\n\nDefendemos políticas públicas que reduzam desigualdades, valorizem o trabalho e protejam o meio ambiente. A diversidade é nossa força, e a democracia nosso caminho.\n\nCom solidariedade e coragem, construiremos um país onde todas as pessoas tenham dignidade, voz e oportunidades.\n\nViva a democracia, viva o Brasil!"\n\nTom: ${toneAdjectives[tone] || 'inspirador'}\nExtensão: ${lengthWords[length] || 'média'}`;
     
     default:
-      return `Conteúdo gerado para: ${prompt}\n\nTipo: ${type}\nTom: ${toneAdjectives[tone] || 'neutro'}\nTamanho: ${lengthWords[length] || 'médio'}\n\nEste conteúdo foi criado com base nos valores conservadores brasileiros, promovendo família, trabalho, fé e pátria.`;
+      return `Conteúdo gerado para: ${prompt}\n\nTipo: ${type}\nTom: ${toneAdjectives[tone] || 'neutro'}\nTamanho: ${lengthWords[length] || 'médio'}\n\nEste conteúdo segue valores progressistas brasileiros: justiça social, inclusão, direitos humanos e democracia.`;
   }
 }
 

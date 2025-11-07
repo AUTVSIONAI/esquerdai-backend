@@ -94,17 +94,21 @@ router.post('/geographic', authenticateUser, async (req, res) => {
 
     // Award points for check-in
     const pointsAwarded = 15; // Extra points for geographic check-in
-    await supabase
-      .from('user_points')
+    const { error: geoPointsError } = await supabase
+      .from('points')
       .insert([
         {
           user_id: userId,
-          points: pointsAwarded,
+          amount: pointsAwarded,
           source: 'geographic_checkin',
           description: `Check-in geográfico no evento: ${event.title}`,
-          event_id,
+          created_at: new Date().toISOString(),
         },
       ]);
+
+    if (geoPointsError) {
+      console.error('Error awarding geographic check-in points:', geoPointsError);
+    }
 
     // Update user's total points
     const { data: currentPoints } = await supabase
@@ -216,6 +220,7 @@ router.post('/', authenticateUser, async (req, res) => {
           user_id: userId,
           amount: pointsAwarded,
           source: 'checkin',
+          category: 'checkin',
           description: `Check-in no evento: ${event.title}`,
           created_at: new Date().toISOString(),
         },
@@ -551,6 +556,15 @@ router.get('/map', async (req, res) => {
     
     if (error) {
       console.error('Erro ao buscar check-ins:', error);
+      const msg = String(error.message || '');
+      // Se a tabela não existir, retornar sucesso com dados vazios
+      if (msg.includes('Could not find the table') || msg.toLowerCase().includes('relation') || msg.toLowerCase().includes('does not exist')) {
+        return res.json({
+          success: true,
+          data: [],
+          total: 0
+        });
+      }
       return res.status(500).json({
         success: false,
         message: 'Erro interno do servidor',

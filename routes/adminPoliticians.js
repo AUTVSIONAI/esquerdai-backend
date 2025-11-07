@@ -783,4 +783,118 @@ router.get('/fetch/senadores', async (req, res) => {
   }
 });
 
+/**
+ * Criar/editar acesso do político (email e conta de usuário)
+ */
+router.post('/:id/access', authenticateUser, requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { email, invite = false, createUser = false } = req.body || {};
+    if (!email || typeof email !== 'string' || !email.includes('@')) {
+      return res.status(400).json({ error: 'E-mail válido é obrigatório.' });
+    }
+
+    // Verificar político
+    const { data: politician, error: polErr } = await supabase
+      .from('politicians')
+      .select('id, name, email, is_approved')
+      .eq('id', id)
+      .single();
+
+    if (polErr || !politician) {
+      return res.status(404).json({ error: 'Político não encontrado' });
+    }
+
+    // Atualizar e-mail do político
+    const { data: updatedPolitician, error: updErr } = await supabase
+      .from('politicians')
+      .update({ email })
+      .eq('id', id)
+      .select('id, name, email')
+      .single();
+
+    if (updErr) {
+      console.error('Erro ao atualizar email do político:', updErr);
+      return res.status(500).json({ error: 'Erro ao salvar e-mail do político' });
+    }
+
+    let createdUserId = null;
+    let tempPassword = null;
+
+    if (createUser || invite) {
+      try {
+        if (createUser) {
+          tempPassword = generateSecurePassword();
+          const { data: createdData, error: createErr } = await supabase.auth.admin.createUser({
+            email,
+            password: tempPassword,
+            email_confirm: false,
+            user_metadata: { role: 'politician' }
+          });
+          if (createErr) {
+            console.error('Erro ao criar usuário:', createErr);
+            return res.status(500).json({ error: 'Erro ao criar usuário de acesso' });
+          }
+          createdUserId = createdData?.user?.id || createdData?.id || null;
+        } else if (invite) {
+          const { data: inviteData, error: inviteErr } = await supabase.auth.admin.inviteUserByEmail(email, {
+            data: { role: 'politician' }
+          });
+          if (inviteErr) {
+            console.error('Erro ao enviar convite:', inviteErr);
+            return res.status(500).json({ error: 'Erro ao enviar convite de acesso' });
+          }
+          createdUserId = inviteData?.user?.id || inviteData?.id || null;
+        }
+
+        // Garantir role 'politician' na tabela users se já tivermos auth_id
+        if (createdUserId) {
+          const { data: existingUser } = await supabase
+            .from('users')
+            .select('id, role')
+            .eq('auth_id', createdUserId)
+            .single();
+
+          if (existingUser?.id) {
+            await supabase
+              .from('users')
+              .update({ role: 'politician', email })
+              .eq('id', existingUser.id);
+          } else {
+            await supabase
+              .from('users')
+              .insert({ auth_id: createdUserId, email, role: 'politician' });
+          }
+        }
+      } catch (adminErr) {
+        console.error('Erro administrativo ao preparar acesso:', adminErr);
+        // Não bloquear salvamento do e-mail por erro secundário
+      }
+    }
+
+    res.json({
+      success: true,
+      data: {
+        politician: updatedPolitician,
+        created_user_id: createdUserId,
+        temp_password: tempPassword
+      },
+      message: 'Acesso do político atualizado com sucesso'
+    });
+  } catch (error) {
+    console.error('Erro em /admin/politicians/:id/access:', error);
+    res.status(500).json({ error: 'Erro interno do servidor' });
+  }
+});
+
+// Utilitário para gerar senha forte
+function generateSecurePassword() {
+  const chars = 'abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ0123456789!@#$%^&*()';
+  let pwd = '';
+  for (let i = 0; i < 12; i++) {
+    pwd += chars[Math.floor(Math.random() * chars.length)];
+  }
+  return pwd;
+}
+
 module.exports = router;

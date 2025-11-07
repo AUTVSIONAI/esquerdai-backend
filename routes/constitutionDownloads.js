@@ -1,6 +1,6 @@
 const express = require('express');
 const { supabase } = require('../config/supabase');
-const { authenticateUser } = require('../middleware/auth');
+const { authenticateUser, resolveUserId } = require('../middleware/auth');
 const router = express.Router();
 
 // Middleware de autenticação para todas as rotas
@@ -10,9 +10,15 @@ router.use(authenticateUser);
 router.get('/users/:userId/status', async (req, res) => {
   try {
     const { userId } = req.params;
+
+    // Resolver o userId (aceita tanto auth_id quanto ID da tabela users)
+    const resolvedUserId = await resolveUserId(userId);
+    if (!resolvedUserId) {
+      return res.status(404).json({ error: 'Usuário não encontrado' });
+    }
     
     // Verificar se o usuário pode acessar estes dados
-    if (req.user.id !== userId && !req.user.is_admin) {
+    if (req.user.id !== resolvedUserId && req.user.role !== 'admin') {
       return res.status(403).json({ error: 'Acesso negado' });
     }
 
@@ -20,7 +26,7 @@ router.get('/users/:userId/status', async (req, res) => {
     const { data: download, error } = await supabase
       .from('constitution_downloads')
       .select('*')
-      .eq('user_id', userId)
+      .eq('user_id', resolvedUserId)
       .single();
 
     if (error && error.code !== 'PGRST116') { // PGRST116 = no rows found
@@ -43,9 +49,15 @@ router.get('/users/:userId/status', async (req, res) => {
 router.post('/users/:userId/register', async (req, res) => {
   try {
     const { userId } = req.params;
+
+    // Resolver o userId (aceita tanto auth_id quanto ID da tabela users)
+    const resolvedUserId = await resolveUserId(userId);
+    if (!resolvedUserId) {
+      return res.status(404).json({ error: 'Usuário não encontrado' });
+    }
     
     // Verificar se o usuário pode registrar este download
-    if (req.user.id !== userId) {
+    if (req.user.id !== resolvedUserId) {
       return res.status(403).json({ error: 'Acesso negado' });
     }
 
@@ -53,7 +65,7 @@ router.post('/users/:userId/register', async (req, res) => {
     const { data: existingDownload } = await supabase
       .from('constitution_downloads')
       .select('id')
-      .eq('user_id', userId)
+      .eq('user_id', resolvedUserId)
       .single();
 
     if (existingDownload) {
@@ -67,7 +79,7 @@ router.post('/users/:userId/register', async (req, res) => {
     const { data: download, error: downloadError } = await supabase
       .from('constitution_downloads')
       .insert({
-        user_id: userId,
+        user_id: resolvedUserId,
         points_awarded: 100
       })
       .select()
@@ -82,7 +94,7 @@ router.post('/users/:userId/register', async (req, res) => {
     const { error: pointsError } = await supabase
       .from('points')
       .insert({
-        user_id: userId,
+        user_id: resolvedUserId,
         amount: 100,
         reason: 'Download da Constituição Federal',
         category: 'constitution_download',

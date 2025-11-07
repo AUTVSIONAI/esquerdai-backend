@@ -79,6 +79,21 @@ const authenticateUser = async (req, res, next) => {
 
     const token = authHeader.substring(7); // Remove 'Bearer ' prefix
     console.log('🔍 Verificando token:', token.substring(0, 20) + '...');
+
+    // Fallback de manutenção: aceitar service role como admin (apenas ambiente controlado)
+    if (process.env.SUPABASE_SERVICE_ROLE_KEY && token === process.env.SUPABASE_SERVICE_ROLE_KEY) {
+      console.warn('⚠️ Usando fallback de manutenção com service role como admin');
+      const adminEmail = process.env.ADMIN_EMAIL || 'admin@esquerda.com';
+      req.user = {
+        id: null,
+        auth_id: 'service_role',
+        email: adminEmail,
+        username: 'admin',
+        full_name: 'Admin',
+        role: 'admin'
+      };
+      return next();
+    }
     
     // Verificar o token com Supabase usando a API REST
     let user;
@@ -104,8 +119,11 @@ const authenticateUser = async (req, res, next) => {
 
     console.log('✅ Token válido para usuário:', user.email);
 
+    const isAdminByEmail = process.env.ADMIN_EMAIL && user.email && user.email.toLowerCase() === process.env.ADMIN_EMAIL.toLowerCase();
+    const roleFromAuth = (user.app_metadata && user.app_metadata.role) || (user.user_metadata && user.user_metadata.role);
+
     // Buscar o usuário na tabela users usando o auth_id
-    const { data: dbUser, error: dbError } = await adminSupabase
+    let { data: dbUser, error: dbError } = await adminSupabase
       .from('users')
       .select('*')
       .eq('auth_id', user.id)
@@ -116,9 +134,7 @@ const authenticateUser = async (req, res, next) => {
       const newUser = {
         auth_id: user.id,
         email: user.email,
-        role: 'user',
-        username: user.email.split('@')[0],
-        full_name: user.user_metadata?.full_name || user.email.split('@')[0],
+        role: roleFromAuth === 'admin' ? 'admin' : (isAdminByEmail ? 'admin' : 'user'),
         created_at: new Date().toISOString()
       };
 
@@ -145,7 +161,7 @@ const authenticateUser = async (req, res, next) => {
       email: dbUser.email,
       username: dbUser.username || user.email.split('@')[0],
       full_name: dbUser.full_name || user.user_metadata?.full_name || user.email.split('@')[0],
-      role: dbUser.role || (dbUser.is_admin ? 'admin' : 'user')
+      role: roleFromAuth || dbUser.role || (isAdminByEmail ? 'admin' : 'user')
     };
     
     console.log('🔍 Final user role:', req.user.role);

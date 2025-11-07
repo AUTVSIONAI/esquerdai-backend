@@ -1,10 +1,20 @@
+# Environment files
 .env
 .env.local
 .env.production
 .env.staging
+
+# Dependencies and builds
 node_modules/
 dist/
 build/
+
+# OS and logs
 .DS_Store
 *.log
+
+# Vercel local files
 .vercel
+
+# Uploaded assets (do not commit)
+uploads/

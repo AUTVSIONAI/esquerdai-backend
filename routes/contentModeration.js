@@ -16,9 +16,9 @@ const requireAdmin = async (req, res, next) => {
     console.log('🔍 Checking admin status for user:', req.user.id)
     
     // Verificar se o usuário é admin usando o campo is_admin
-    if (!req.user.is_admin) {
+    if (req.user.role !== 'admin') {
       console.log('❌ Access denied - user is_admin:', req.user.is_admin)
-      return res.status(403).json({ error: 'Acesso negado. Apenas administradores.' })
+      return res.status(403).json({ error: 'Acesso negado' })
     }
 
     console.log('✅ Admin access granted')

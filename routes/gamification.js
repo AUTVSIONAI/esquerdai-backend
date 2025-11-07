@@ -172,7 +172,7 @@ router.get('/users/:userId/stats', async (req, res) => {
     }
     
     // Verificar se o usuário pode acessar estes dados
-    if (req.user.id !== resolvedUserId && !req.user.is_admin) {
+    if (req.user.id !== resolvedUserId && req.user.role !== 'admin') {
       return res.status(403).json({ error: 'Acesso negado' });
     }
 
@@ -229,7 +229,7 @@ router.get('/users/:userId/activities', async (req, res) => {
     }
     
     // Verificar se o usuário pode acessar estes dados
-    if (req.user.id !== resolvedUserId && !req.user.is_admin) {
+    if (req.user.id !== resolvedUserId && req.user.role !== 'admin') {
       return res.status(403).json({ error: 'Acesso negado' });
     }
 
@@ -356,27 +356,42 @@ router.get('/users/:userId/points', async (req, res) => {
     }
     
     // Verificar se o usuário pode acessar estes dados
-    if (req.user.id !== resolvedUserId && !req.user.is_admin) {
+    if (req.user.id !== resolvedUserId && req.user.role !== 'admin') {
       console.log('❌ Gamification - Acesso negado');
       return res.status(403).json({ error: 'Acesso negado' });
     }
 
     console.log('✅ Gamification - Acesso permitido, buscando pontos...');
-    const { data: pointsData, error: pointsError } = await supabase
-      .from('points')
-      .select('amount')
-      .eq('user_id', resolvedUserId);
-
-    if (pointsError) {
-      console.error('❌ Gamification - Erro ao buscar pontos:', pointsError);
+    let pointsData = [];
+    let pointsError = null;
+    try {
+      const result = await supabase
+        .from('points')
+        .select('amount')
+        .eq('user_id', resolvedUserId);
+      pointsData = result.data || [];
+      pointsError = result.error || null;
+    } catch (err) {
+      pointsError = err;
     }
 
-    let totalPoints = pointsData?.reduce((sum, point) => sum + point.amount, 0) || 0;
+    if (pointsError) {
+      const msg = pointsError?.message || '';
+      const code = pointsError?.code || '';
+      const missingTable = code === '42P01' || /relation .*points/i.test(msg);
+      console.warn('⚠️ Gamification - Falha ao buscar pontos:', { code, msg });
+      if (missingTable) {
+        console.warn('⚠️ Gamification - Tabela points ausente. Retornando totais zerados.');
+        return res.status(200).json({ total: 0, level: 1, nextLevelPoints: 100 });
+      }
+      // Fallback geral para evitar 500
+      pointsData = [];
+    }
+
+    let totalPoints = pointsData.reduce((sum, point) => sum + (point?.amount || 0), 0);
     console.log('🎮 Gamification - Total points found:', totalPoints);
     console.log('🎮 Gamification - Points data:', pointsData);
     
-    // Dados reais do usuário - sem dados de demonstração
-
     const response = {
       total: totalPoints,
       level: Math.floor(totalPoints / 100) + 1,
@@ -408,7 +423,7 @@ router.post('/users/:userId/points/add', async (req, res) => {
     }
     
     // Verificar se o usuário pode adicionar pontos (admin ou próprio usuário)
-    if (req.user.id !== resolvedUserId && !req.user.is_admin) {
+    if (req.user.id !== resolvedUserId && req.user.role !== 'admin') {
       return res.status(403).json({ error: 'Acesso negado' });
     }
 
@@ -994,7 +1009,7 @@ router.get('/users/:userId/points/transactions', async (req, res) => {
     }
     
     // Verificar se o usuário pode acessar estes dados
-    if (req.user.id !== resolvedUserId && !req.user.is_admin) {
+    if (req.user.id !== resolvedUserId && req.user.role !== 'admin') {
       return res.status(403).json({ error: 'Acesso negado' });
     }
 
@@ -1015,14 +1030,23 @@ router.get('/users/:userId/points/transactions', async (req, res) => {
     const { data: transactions, error } = await query;
 
     if (error) {
-      console.error('Error fetching points transactions:', error);
-      return res.status(500).json({ error: 'Erro ao buscar transações' });
+      const msg = error?.message || '';
+      const code = error?.code || '';
+      const missingTable = code === '42P01' || /relation .*points/i.test(msg);
+      console.warn('⚠️ Gamification - Falha ao buscar transações:', { code, msg });
+      if (missingTable) {
+        console.warn('⚠️ Gamification - Tabela points ausente. Retornando lista vazia.');
+        return res.status(200).json([]);
+      }
+      // Fallback geral para evitar 500
+      return res.status(200).json([]);
     }
 
     res.json(transactions || []);
   } catch (error) {
     console.error('Error fetching points transactions:', error);
-    res.status(500).json({ error: 'Erro interno do servidor' });
+    // Fallback para evitar quebra no frontend
+    return res.status(200).json([]);
   }
 });
 
@@ -1044,21 +1068,53 @@ router.get('/users/:userId/goals', async (req, res) => {
       .select('*')
       .eq('user_id', targetUserId)
       .eq('goal_type', type)
+      .eq('status', 'active')
       .order('created_at', { ascending: false });
     
     if (period === 'current') {
       const now = new Date();
-      console.log('🎯 Goals - current period filter, now:', now.toISOString().split('T')[0]);
+      const isoDate = now.toISOString().split('T')[0];
+      console.log('🎯 Goals - current period filter, now:', isoDate);
       query = query
-        .lte('period_start', now.toISOString().split('T')[0])
-        .gte('period_end', now.toISOString().split('T')[0]);
+        .lte('period_start', isoDate)
+        .gte('period_end', isoDate);
     }
     
     const { data: goals, error } = await query;
     
     if (error) {
-      console.error('❌ Goals - Error fetching user goals:', error);
-      return res.status(500).json({ error: 'Erro ao buscar metas do usuário' });
+      const msg = error?.message || '';
+      const code = error?.code || '';
+      const missingTable = code === '42P01' || /relation .*user_goals/i.test(msg);
+      console.warn('⚠️ Goals - Falha ao buscar metas:', { code, msg });
+      if (missingTable) {
+        console.warn('⚠️ Goals - Tabela user_goals ausente. Retornando lista vazia.');
+        return res.status(200).json([]);
+      }
+      // Fallback geral para evitar 500
+      return res.status(200).json([]);
+    }
+
+    // Fallback: se nenhuma meta atual encontrada, retornar a última meta ativa
+    if ((!goals || goals.length === 0) && period === 'current') {
+      console.log('🎯 Goals - Nenhuma meta no período atual. Buscando última meta ativa...');
+      const { data: lastActiveGoals, error: lastError } = await supabase
+        .from('user_goals')
+        .select('*')
+        .eq('user_id', targetUserId)
+        .eq('goal_type', type)
+        .eq('status', 'active')
+        .order('period_start', { ascending: false })
+        .limit(1);
+      
+      if (lastError) {
+        console.warn('⚠️ Goals - Erro no fallback de última meta ativa:', lastError?.message || lastError);
+      }
+      
+      if (lastActiveGoals && lastActiveGoals.length > 0) {
+        console.log('🎯 Goals - Retornando última meta ativa como fallback:', lastActiveGoals[0]);
+        return res.json(lastActiveGoals);
+      }
     }
     
     console.log('🎯 Goals - Found goals:', goals);
@@ -1068,7 +1124,8 @@ router.get('/users/:userId/goals', async (req, res) => {
     res.json(goals || []);
   } catch (error) {
     console.error('Error in goals endpoint:', error);
-    res.status(500).json({ error: 'Erro interno do servidor' });
+    // Fallback para evitar quebra no frontend
+    return res.status(200).json([]);
   }
 });
 
@@ -1221,8 +1278,44 @@ router.post('/users/:userId/goals/auto-create', async (req, res) => {
     console.log('🎯 Auto-create goal - Resultado da inserção:', { newGoal, error });
     
     if (error) {
-      console.error('❌ Auto-create goal - Erro ao criar meta:', error);
-      return res.status(500).json({ error: 'Erro ao criar meta automática' });
+      const msg = error?.message || '';
+      const code = error?.code || '';
+      const missingTable = code === '42P01' || /relation .*user_goals/i.test(msg);
+      console.warn('⚠️ Auto-create goal - Falha ao criar meta:', { code, msg });
+      if (missingTable) {
+        console.warn('⚠️ Auto-create goal - Tabela user_goals ausente. Retornando fallback.');
+        const fallbackGoal = {
+          id: `fallback-${targetUserId}-${monthStart}`,
+          user_id: targetUserId,
+          goal_type: 'monthly_points',
+          target_value: targetValue,
+          current_value: 0,
+          period_start: monthStart,
+          period_end: monthEnd,
+          status: 'active',
+          auto_generated: true,
+          is_fallback: true,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString()
+        };
+        return res.status(200).json(fallbackGoal);
+      }
+      // Fallback geral para evitar 500
+      const fallbackGoal = {
+        id: `fallback-${targetUserId}-${monthStart}`,
+        user_id: targetUserId,
+        goal_type: 'monthly_points',
+        target_value: targetValue,
+        current_value: 0,
+        period_start: monthStart,
+        period_end: monthEnd,
+        status: 'active',
+        auto_generated: true,
+        is_fallback: true,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      };
+      return res.status(200).json(fallbackGoal);
     }
     
     console.log('✅ Auto-create goal - Meta criada com sucesso:', newGoal);
@@ -1247,25 +1340,53 @@ router.get('/users/:userId/achievements', async (req, res) => {
     }
     
     // Verificar permissão
-    if (req.user.id !== resolvedUserId && !req.user.is_admin) {
+    if (!req.user || (req.user.id !== resolvedUserId && req.user.role !== 'admin')) {
       return res.status(403).json({ error: 'Acesso negado' });
     }
     
     // Buscar badges do usuário
-    const { data: userBadges, error } = await supabase
-      .from('badges')
-      .select('*')
-      .eq('user_id', resolvedUserId)
-      .order('earned_at', { ascending: false });
-    
-    if (error) {
-      console.error('Error fetching user badges:', error);
-      return res.status(500).json({ error: 'Erro ao buscar conquistas do usuário' });
+    let userBadges = [];
+    let badgesError = null;
+    try {
+      const result = await supabase
+        .from('badges')
+        .select('*')
+        .eq('user_id', resolvedUserId)
+        .order('earned_at', { ascending: false });
+      userBadges = result.data || [];
+      badgesError = result.error || null;
+    } catch (err) {
+      badgesError = err;
     }
     
-    // Buscar todas as conquistas disponíveis
-    const allAchievementsResponse = await fetch(`${req.protocol}://${req.get('host')}/api/gamification/achievements`);
-    const allAchievements = await allAchievementsResponse.json();
+    if (badgesError) {
+      const msg = badgesError?.message || '';
+      const code = badgesError?.code || '';
+      const missingTable = code === '42P01' || /relation .*badges/i.test(msg);
+      console.warn('⚠️ Achievements - Falha ao buscar badges:', { code, msg });
+      if (missingTable) {
+        console.warn('⚠️ Achievements - Tabela badges ausente. Prosseguindo com lista vazia.');
+        userBadges = [];
+      } else {
+        userBadges = [];
+      }
+    }
+    
+    // Buscar todas as conquistas disponíveis com fallback
+    let allAchievements = [];
+    try {
+      const url = `${req.protocol}://${req.get('host')}/api/gamification/achievements`;
+      const allAchievementsResponse = await fetch(url);
+      if (allAchievementsResponse.ok) {
+        allAchievements = await allAchievementsResponse.json();
+      } else {
+        console.warn('⚠️ Achievements - Rota base retornou status não-OK:', allAchievementsResponse.status);
+        allAchievements = [];
+      }
+    } catch (err) {
+      console.warn('⚠️ Achievements - Erro ao buscar conquistas base:', err?.message);
+      allAchievements = [];
+    }
     
     // Mapear conquistas com status de desbloqueio
     const userAchievements = allAchievements.map(achievement => {
@@ -1292,7 +1413,8 @@ router.get('/users/:userId/achievements', async (req, res) => {
     res.json(filteredAchievements);
   } catch (error) {
     console.error('Error fetching user achievements:', error);
-    res.status(500).json({ error: 'Erro interno do servidor' });
+    // Fallback para evitar 500 e não quebrar o frontend
+    return res.status(200).json([]);
   }
 });
 
@@ -1307,7 +1429,7 @@ router.get('/users/:userId/achievements/:achievementId/progress', async (req, re
     }
     
     // Verificar permissão
-    if (req.user.id !== resolvedUserId && !req.user.is_admin) {
+    if (!req.user || (req.user.id !== resolvedUserId && req.user.role !== 'admin')) {
       return res.status(403).json({ error: 'Acesso negado' });
     }
     
@@ -1413,7 +1535,7 @@ router.post('/users/:userId/achievements/:achievementId/unlock', async (req, res
     }
     
     // Verificar permissão
-    if (req.user.id !== resolvedUserId && !req.user.is_admin) {
+    if (req.user.id !== resolvedUserId && req.user.role !== 'admin') {
       return res.status(403).json({ error: 'Acesso negado' });
     }
     
@@ -1512,6 +1634,88 @@ router.post('/users/:userId/achievements/:achievementId/unlock', async (req, res
 });
 
 // Rota catch-all para endpoints não implementados
+// GET /gamification/users/:userId/ranking - Posição do usuário no ranking
+router.get('/users/:userId/ranking', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const { type = 'points', period = 'all_time' } = req.query;
+
+    const resolvedUserId = await resolveUserId(userId);
+    if (!resolvedUserId) {
+      return res.status(404).json({ error: 'Usuário não encontrado' });
+    }
+
+    if (req.user.id !== resolvedUserId && req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Acesso negado' });
+    }
+
+    let sinceDate = null;
+    const now = new Date();
+    if (period === 'daily') sinceDate = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    else if (period === 'weekly') sinceDate = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 7);
+    else if (period === 'monthly') sinceDate = new Date(now.getFullYear(), now.getMonth(), 1);
+    else if (period === 'yearly') sinceDate = new Date(now.getFullYear(), 0, 1);
+
+    let pointsQuery = supabase
+      .from('points')
+      .select('user_id, amount, created_at');
+
+    if (sinceDate) pointsQuery = pointsQuery.gte('created_at', sinceDate.toISOString());
+
+    const { data: points, error } = await pointsQuery;
+
+    if (error) {
+      const msg = error?.message || '';
+      const code = error?.code || '';
+      const missingTable = code === '42P01' || /relation .*points/i.test(msg);
+      if (missingTable) {
+        return res.status(200).json({ position: 0, entry: null, totalParticipants: 0, is_fallback: true });
+      }
+      return res.status(200).json({ position: 0, entry: null, totalParticipants: 0 });
+    }
+
+    const totals = new Map();
+    for (const p of points || []) {
+      totals.set(p.user_id, (totals.get(p.user_id) || 0) + (p.amount || 0));
+    }
+
+    const totalParticipants = totals.size;
+    const sorted = [...totals.entries()].sort((a, b) => b[1] - a[1]);
+    const position = sorted.findIndex(([uid]) => uid === resolvedUserId) + 1;
+
+    let entry = null;
+    if (position > 0) {
+      const score = sorted[position - 1][1];
+      const { data: userRow } = await supabase
+        .from('users')
+        .select('id, username, full_name, avatar_url, plan')
+        .eq('id', resolvedUserId)
+        .single();
+      entry = {
+        id: `${resolvedUserId}-${period}-${type}`,
+        leaderboard_id: `global-${type}-${period}`,
+        user_id: resolvedUserId,
+        user: {
+          id: userRow?.id || resolvedUserId,
+          username: userRow?.username || null,
+          full_name: userRow?.full_name || null,
+          avatar_url: userRow?.avatar_url || null,
+          level: { id: 'level', name: 'Nível', level_number: Math.floor((score || 0) / 100) + 1, min_points: 0, max_points: 0, color: '#FFD700', benefits: [], multiplier: 1, is_active: true, created_at: new Date().toISOString(), updated_at: new Date().toISOString() }
+        },
+        rank: position,
+        score,
+        rank_change: 0,
+        updated_at: new Date().toISOString()
+      };
+    }
+
+    return res.json({ position, entry, totalParticipants });
+  } catch (err) {
+    console.error('Error in user ranking route:', err);
+    return res.status(200).json({ position: 0, entry: null, totalParticipants: 0 });
+  }
+});
+
 router.use('*', (req, res) => {
   res.status(501).json({ 
     error: 'Endpoint não implementado',

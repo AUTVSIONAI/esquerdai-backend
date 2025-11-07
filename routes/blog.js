@@ -21,6 +21,105 @@ function isValidUUID(str) {
   return uuidRegex.test(str);
 }
 
+// Helper: construir URL absoluta para imagens de upload com base no host
+function getAbsoluteImageUrlBackend(imageUrl, req) {
+  if (!imageUrl) return null;
+  if (imageUrl.startsWith('http://') || imageUrl.startsWith('https://')) return imageUrl;
+  const baseApi = `${req.protocol}://${req.get('host')}/api`;
+  if (imageUrl.startsWith('/api/upload/files/')) {
+    const relativePath = imageUrl.replace('/api', '');
+    return `${baseApi}${relativePath}`;
+  }
+  if (imageUrl.startsWith('/upload/files/')) {
+    return `${baseApi}${imageUrl}`;
+  }
+  if (!imageUrl.startsWith('/')) {
+    return `${baseApi}/upload/files/${imageUrl}`;
+  }
+  return `${baseApi}${imageUrl}`;
+}
+
+// ===== Novo: utilitário para descobrir colunas disponíveis =====
+async function getPublicTableColumns(tableName) {
+  try {
+    const { data, error } = await supabase
+      .schema('information_schema')
+      .from('columns')
+      .select('column_name')
+      .eq('table_schema', 'public')
+      .eq('table_name', tableName);
+
+    if (error || !data) {
+      // Fallback: para tabelas conhecidas, retornar colunas esperadas
+      if (tableName === 'politician_posts') {
+        return new Set([
+          'id', 'title', 'content', 'author_id', 'cover_image_url', 'tags',
+          'is_published', 'published_at', 'views', 'shares_count', 'comments_count',
+          'likes_count', 'created_at', 'updated_at'
+        ]);
+      }
+      return new Set();
+    }
+    return new Set(data.map((c) => c.column_name));
+  } catch (e) {
+    // Fallback: colunas padrão para politician_posts
+    if (tableName === 'politician_posts') {
+      return new Set([
+        'id', 'title', 'content', 'author_id', 'cover_image_url', 'tags',
+        'is_published', 'published_at', 'views', 'shares_count', 'comments_count',
+        'likes_count', 'created_at', 'updated_at'
+      ]);
+    }
+    return new Set();
+  }
+}
+
+// ===== Novo: helper para verificar se uma tabela existe =====
+async function tableExists(tableName) {
+  try {
+    // Método robusto: tenta um select HEAD na tabela.
+    const { error } = await supabase
+      .from(tableName)
+      .select('id', { head: true })
+      .limit(1);
+
+    if (error) {
+      const msg = (error.message || '').toLowerCase();
+      // Erros típicos quando a relação não existe
+      if (
+        msg.includes('relation') ||
+        msg.includes('does not exist') ||
+        msg.includes('not exist') ||
+        msg.includes('not found')
+      ) {
+        return false;
+      }
+      // Em outros erros (ex.: permissões), assumir que existe para evitar falso negativo
+      return true;
+    }
+
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+// ===== Novo: helper para chamar RPCs sem falhar a requisição =====
+async function safeRpc(functionName, params) {
+  try {
+    if (!functionName) return null;
+    const { data, error } = await supabase.rpc(functionName, params || {});
+    if (error) {
+      console.warn(`RPC ${functionName} falhou:`, error?.message || error);
+      return null;
+    }
+    return data;
+  } catch (e) {
+    console.warn(`RPC ${functionName} falhou com exceção:`, e?.message || e);
+    return null;
+  }
+}
+
 // GET /api/blog - Listar todos os posts publicados
 router.get('/', async (req, res) => {
   try {
@@ -31,14 +130,16 @@ router.get('/', async (req, res) => {
       .order('published_at', { ascending: false });
 
     if (error) {
-      console.error('Erro ao buscar posts:', error);
-      return res.status(500).json({ error: 'Erro interno do servidor' });
+      // Fallback resiliente: se houver erro ao consultar a tabela (inclui tabela ausente), retorna lista vazia
+      return res.json({ success: true, data: [], total: 0 });
     }
 
-    // Adicionar slug gerado dinamicamente para cada post
-    const postsWithSlugs = posts.map(post => ({
+    const safePosts = Array.isArray(posts) ? posts : [];
+    const postsWithSlugs = safePosts.map(post => ({
       ...post,
-      slug: generateSlug(post.title)
+      slug: generateSlug(post.title || ''),
+      // Compatibilidade: frontend usa featured_image_url na listagem
+      featured_image_url: getAbsoluteImageUrlBackend(post.cover_image_url || post.featured_image_url, req) || null
     }));
 
     res.json({
@@ -66,14 +167,15 @@ router.get('/posts', async (req, res) => {
       .range(offset, offset + limit - 1);
 
     if (error) {
-      console.error('Erro ao buscar posts:', error);
-      return res.status(500).json({ error: 'Erro interno do servidor' });
+      // Fallback resiliente: se houver erro ao consultar a tabela (inclui tabela ausente), retorna lista vazia
+      return res.json([]);
     }
 
-    // Adicionar slug gerado dinamicamente para cada post
-    const postsWithSlugs = posts.map(post => ({
+    const safePosts = Array.isArray(posts) ? posts : [];
+    const postsWithSlugs = safePosts.map(post => ({
       ...post,
-      slug: generateSlug(post.title)
+      slug: generateSlug(post.title || ''),
+      featured_image_url: getAbsoluteImageUrlBackend(post.cover_image_url || post.featured_image_url, req) || null
     }));
 
     res.json(postsWithSlugs);
@@ -123,7 +225,7 @@ router.get('/posts/:identifier', async (req, res) => {
         // Buscar posts relacionados
         const { data: relatedPosts } = await supabase
           .from('politician_posts')
-          .select('id, title, summary, featured_image, published_at')
+          .select('*')
           .eq('is_published', true)
           .neq('id', post.id)
           .limit(4)
@@ -153,7 +255,7 @@ router.get('/posts/:identifier', async (req, res) => {
     // Buscar posts relacionados
     const { data: relatedPosts } = await supabase
       .from('politician_posts')
-      .select('id, title, summary, featured_image, published_at')
+      .select('*')
       .eq('is_published', true)
       .neq('id', post.id)
       .limit(4)
@@ -226,7 +328,7 @@ router.get('/:identifier', async (req, res) => {
       // Buscar posts relacionados do mesmo político
       const { data: relatedPosts } = await supabase
         .from('politician_posts')
-        .select('id, title, cover_image_url, published_at')
+        .select('*')
         .eq('author_id', post.author_id)
         .eq('is_published', true)
         .neq('id', post.id)
@@ -265,7 +367,7 @@ router.get('/:identifier', async (req, res) => {
     // Buscar posts relacionados do mesmo político
     const { data: relatedPosts } = await supabase
       .from('politician_posts')
-      .select('id, title, cover_image_url, published_at, created_at, excerpt')
+      .select('*')
       .eq('author_id', post.author_id)
       .eq('is_published', true)
       .neq('id', post.id)
@@ -310,18 +412,29 @@ router.put('/:id', authenticateUser, async (req, res) => {
       return res.status(403).json({ error: 'Permissão negada' });
     }
 
+    const columns = await getPublicTableColumns('politician_posts');
+
     // Atualizar o post
     const updateData = {
       title,
       content,
-      cover_image_url,
-      tags: tags || [],
-      is_published: is_published || false,
+      is_published: !!is_published,
       updated_at: new Date().toISOString()
     };
 
     if (is_published) {
       updateData.published_at = new Date().toISOString();
+    }
+
+    const imageUrlBody = cover_image_url || req.body.featured_image_url;
+    if (imageUrlBody) {
+      if (columns.has('cover_image_url')) updateData.cover_image_url = imageUrlBody;
+      else if (columns.has('featured_image_url')) updateData.featured_image_url = imageUrlBody;
+      else if (columns.has('featured_image')) updateData.featured_image = imageUrlBody;
+    }
+
+    if (Array.isArray(tags) && columns.has('tags')) {
+      updateData.tags = tags;
     }
 
     const { data: updatedPost, error } = await supabase
@@ -333,13 +446,14 @@ router.put('/:id', authenticateUser, async (req, res) => {
 
     if (error) {
       console.error('Erro ao atualizar post:', error);
-      return res.status(500).json({ error: 'Erro interno do servidor' });
+      return res.status(500).json({ error: 'Erro interno do servidor', detail: process.env.NODE_ENV !== 'production' ? (error?.message || error) : undefined });
     }
 
     // Adicionar slug ao post atualizado
     const postWithSlug = {
       ...updatedPost,
-      slug: generateSlug(updatedPost.title)
+      slug: generateSlug(updatedPost.title),
+      featured_image_url: getAbsoluteImageUrlBackend(updatedPost.cover_image_url || updatedPost.featured_image_url, req) || null
     };
 
     res.json(postWithSlug);
@@ -402,7 +516,7 @@ router.post('/', authenticateUser, async (req, res) => {
     // Verificar se o usuário tem permissão (admin ou journalist)
     const { data: user, error: userError } = await supabase
       .from('users')
-      .select('role')
+      .select('role, email')
       .eq('id', userId)
       .single();
 
@@ -431,20 +545,59 @@ router.post('/', authenticateUser, async (req, res) => {
       }
     }
 
-    // Criar o post
+    // Determinar author_id: prioriza politician_id; senão tenta resolver pelo e-mail do usuário
+    let authorId = null;
+    if (politician_id) {
+      authorId = politician_id;
+    } else if (user?.email) {
+      const { data: mePolitician, error: mePolError } = await supabase
+        .from('politicians')
+        .select('id')
+        .eq('email', user.email)
+        .eq('is_active', true)
+        .eq('is_approved', true)
+        .single();
+      if (!mePolError && mePolitician?.id) {
+        authorId = mePolitician.id;
+      }
+    }
+
+    // Permitir posts gerais sem associação a político
+    const tableName = 'politician_posts';
+    const exists = await tableExists(tableName);
+    if (!exists) {
+      return res.status(503).json({ error: 'Tabela de posts indisponível', detail: "Crie a tabela 'public.politician_posts' no Supabase antes de publicar." });
+    }
+
+    const columns = await getPublicTableColumns(tableName);
+
+    // Criar o post (somente colunas existentes)
     const postData = {
       title,
       content,
-      cover_image_url,
-      tags: tags || [],
-      author_id: politician_id || userId, // Usar politician_id se fornecido, senão usar userId
-      is_published: is_published || false,
+      is_published: !!is_published,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString()
     };
 
+    // Se houver associação a político, definir author_id
+    if (authorId) {
+      postData.author_id = authorId;
+    }
+
     if (is_published) {
       postData.published_at = new Date().toISOString();
+    }
+
+    const imageUrlBody = cover_image_url || req.body.featured_image_url;
+    if (imageUrlBody) {
+      if (columns.has('cover_image_url')) postData.cover_image_url = imageUrlBody;
+      else if (columns.has('featured_image_url')) postData.featured_image_url = imageUrlBody;
+      else if (columns.has('featured_image')) postData.featured_image = imageUrlBody;
+    }
+
+    if (Array.isArray(tags) && columns.has('tags')) {
+      postData.tags = tags;
     }
 
     const { data: newPost, error } = await supabase
@@ -454,14 +607,15 @@ router.post('/', authenticateUser, async (req, res) => {
       .single();
 
     if (error) {
-      console.error('Erro ao criar post:', error);
-      return res.status(500).json({ error: 'Erro interno do servidor' });
+      console.error('Erro ao criar post:', error?.message || error);
+      return res.status(500).json({ error: 'Erro interno do servidor', detail: process.env.NODE_ENV !== 'production' ? (error?.message || error) : undefined });
     }
 
     // Adicionar slug ao post criado
     const postWithSlug = {
       ...newPost,
-      slug: generateSlug(newPost.title)
+      slug: generateSlug(newPost.title),
+      featured_image_url: getAbsoluteImageUrlBackend(newPost.cover_image_url || newPost.featured_image_url, req) || null
     };
 
     res.status(201).json(postWithSlug);
@@ -490,6 +644,12 @@ router.post('/:postId/like', authenticateUser, async (req, res) => {
       return res.status(404).json({ error: 'Post não encontrado' });
     }
 
+    // Verificar se a tabela de curtidas existe
+    if (!(await tableExists('blog_post_likes'))) {
+      await safeRpc('increment_likes_count', { post_id: postId });
+      return res.json({ liked: false, message: 'Recurso de curtidas indisponível' });
+    }
+
     // Verificar se já curtiu
     const { data: existingLike } = await supabase
       .from('blog_post_likes')
@@ -507,7 +667,7 @@ router.post('/:postId/like', authenticateUser, async (req, res) => {
         .eq('user_id', userId);
 
       // Decrementar contador
-      await supabase.rpc('decrement_likes_count', { post_id: postId });
+      await safeRpc('decrement_likes_count', { post_id: postId });
       
       res.json({ liked: false, message: 'Post descurtido' });
     } else {
@@ -517,7 +677,7 @@ router.post('/:postId/like', authenticateUser, async (req, res) => {
         .insert({ post_id: postId, user_id: userId });
 
       // Incrementar contador
-      await supabase.rpc('increment_likes_count', { post_id: postId });
+      await safeRpc('increment_likes_count', { post_id: postId });
       
       res.json({ liked: true, message: 'Post curtido' });
     }
@@ -532,6 +692,11 @@ router.get('/:postId/like-status', authenticateUser, async (req, res) => {
   try {
     const { postId } = req.params;
     const userId = req.user.id;
+
+    // Se a tabela de curtidas não existir, retornar false
+    if (!(await tableExists('blog_post_likes'))) {
+      return res.json({ liked: false });
+    }
 
     const { data: like } = await supabase
       .from('blog_post_likes')
@@ -565,6 +730,12 @@ router.post('/:postId/share', authenticateUser, async (req, res) => {
       return res.status(404).json({ error: 'Post não encontrado' });
     }
 
+    // Se a tabela de compartilhamentos não existir, registrar no contador (se disponível) e retornar sucesso
+    if (!(await tableExists('blog_post_shares'))) {
+      await safeRpc('increment_shares_count', { post_id: postId });
+      return res.json({ message: 'Compartilhamento registrado (sem persistência)' });
+    }
+
     // Registrar compartilhamento
     await supabase
       .from('blog_post_shares')
@@ -575,7 +746,7 @@ router.post('/:postId/share', authenticateUser, async (req, res) => {
       });
 
     // Incrementar contador
-    await supabase.rpc('increment_shares_count', { post_id: postId });
+    await safeRpc('increment_shares_count', { post_id: postId });
     
     res.json({ message: 'Post compartilhado com sucesso' });
   } catch (error) {
@@ -602,9 +773,14 @@ router.post('/:postId/view', async (req, res) => {
       return res.status(404).json({ error: 'Post não encontrado' });
     }
 
+    // Se a tabela de visualizações não existir, tenta apenas incrementar contador (se disponível) e retorna sucesso
+    if (!(await tableExists('blog_post_views'))) {
+      await safeRpc('increment_views_count', { post_id: postId });
+      return res.json({ message: 'Visualização registrada' });
+    }
+
     // Registrar visualização (evitar duplicatas por IP nas últimas 24h)
     const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-    
     const { data: existingView } = await supabase
       .from('blog_post_views')
       .select('id')
@@ -623,7 +799,7 @@ router.post('/:postId/view', async (req, res) => {
         });
 
       // Incrementar contador
-      await supabase.rpc('increment_views_count', { post_id: postId });
+      await safeRpc('increment_views_count', { post_id: postId });
     }
     
     res.json({ message: 'Visualização registrada' });
@@ -651,6 +827,19 @@ router.get('/:postId/comments', async (req, res) => {
 
     if (postError || !post) {
       return res.status(404).json({ error: 'Post não encontrado' });
+    }
+
+    // Se a tabela de comentários não existir, retornar lista vazia
+    if (!(await tableExists('blog_comments'))) {
+      return res.json({
+        comments: [],
+        pagination: {
+          page: parseInt(page),
+          limit: parseInt(limit),
+          total: 0,
+          totalPages: 0
+        }
+      });
     }
 
     // Buscar comentários com informações do usuário
@@ -714,6 +903,11 @@ router.post('/:postId/comments', authenticateUser, async (req, res) => {
       return res.status(400).json({ error: 'Comentário muito longo (máximo 1000 caracteres)' });
     }
 
+    // Se a tabela de comentários não existir, retornar indisponível
+    if (!(await tableExists('blog_comments'))) {
+      return res.status(503).json({ error: 'Comentários indisponíveis no momento' });
+    }
+
     // Verificar se o post existe
     const { data: post, error: postError } = await supabase
       .from('politician_posts')
@@ -753,7 +947,7 @@ router.post('/:postId/comments', authenticateUser, async (req, res) => {
     }
 
     // Incrementar contador de comentários do post
-    await supabase.rpc('increment_comments_count', { post_id: postId });
+    await safeRpc('increment_comments_count', { post_id: postId });
 
     res.status(201).json(comment);
   } catch (error) {
@@ -768,10 +962,15 @@ router.post('/comments/:commentId/like', authenticateUser, async (req, res) => {
     const { commentId } = req.params;
     const userId = req.user.id;
 
+    // Se a tabela de curtidas/comentários não existir, responder com no-op
+    if (!(await tableExists('blog_comment_likes')) || !(await tableExists('blog_comments'))) {
+      return res.json({ liked: false, message: 'Recurso de curtidas de comentários indisponível' });
+    }
+
     // Verificar se o comentário existe
     const { data: comment, error: commentError } = await supabase
       .from('blog_comments')
-      .select('id')
+      .select('id, post_id')
       .eq('id', commentId)
       .single();
 
@@ -796,7 +995,7 @@ router.post('/comments/:commentId/like', authenticateUser, async (req, res) => {
         .eq('user_id', userId);
 
       // Decrementar contador
-      await supabase.rpc('decrement_comment_likes_count', { comment_id: commentId });
+      await safeRpc('decrement_comment_likes_count', { comment_id: commentId });
       
       res.json({ liked: false, message: 'Comentário descurtido' });
     } else {
@@ -806,7 +1005,7 @@ router.post('/comments/:commentId/like', authenticateUser, async (req, res) => {
         .insert({ comment_id: commentId, user_id: userId });
 
       // Incrementar contador
-      await supabase.rpc('increment_comment_likes_count', { comment_id: commentId });
+      await safeRpc('increment_comment_likes_count', { comment_id: commentId });
       
       res.json({ liked: true, message: 'Comentário curtido' });
     }
@@ -822,6 +1021,11 @@ router.delete('/comments/:commentId', authenticateUser, async (req, res) => {
     const { commentId } = req.params;
     const userId = req.user.id;
     const userRole = req.user.role;
+
+    // Se a tabela de comentários não existir, tratar como não encontrado
+    if (!(await tableExists('blog_comments'))) {
+      return res.status(404).json({ error: 'Comentário não encontrado' });
+    }
 
     // Buscar comentário
     const { data: comment, error: commentError } = await supabase
@@ -850,9 +1054,9 @@ router.delete('/comments/:commentId', authenticateUser, async (req, res) => {
     }
 
     // Decrementar contador de comentários do post
-    await supabase.rpc('decrement_comments_count', { post_id: comment.post_id });
+    await safeRpc('decrement_comments_count', { post_id: comment.post_id });
 
-    res.json({ message: 'Comentário deletado com sucesso' });
+    res.json({ message: 'Comentário excluído com sucesso' });
   } catch (error) {
     console.error('Erro ao deletar comentário:', error);
     res.status(500).json({ error: 'Erro interno do servidor' });

@@ -103,12 +103,38 @@ router.get('/products/:id', authenticateUser, authenticateAdmin, async (req, res
 // Create product
 router.post('/products', authenticateUser, authenticateAdmin, async (req, res) => {
   try {
+    const { name, description, price, category, stock, stock_quantity, image, status, active, featured } = req.body;
+
+    const rawName = typeof name === 'string' ? name.trim() : '';
+    const rawCategory = typeof category === 'string' ? category.trim() : '';
+
+    const normalizedPrice = typeof price === 'number'
+      ? price
+      : Number((price ?? '').toString().replace(/[^\d.,-]/g, '').replace(',', '.'));
+    const parsedPrice = Number.isNaN(normalizedPrice) ? NaN : normalizedPrice;
+
+    if (!rawName || Number.isNaN(parsedPrice) || !rawCategory) {
+      return res.status(400).json({ error: 'Name, price, and category are required' });
+    }
+
+    const parsedStockInput = stock !== undefined ? stock : stock_quantity;
+    const parsedStock = parsedStockInput !== undefined ? parseInt(parsedStockInput) : 0;
+
+    const isActive = typeof active === 'boolean' ? active : (status ? status === 'active' : true);
+    const computedStatus = status || ((parsedStock || 0) > 0 ? 'active' : 'out_of_stock');
+
     const productData = {
-      ...req.body,
+      name: rawName,
+      description,
+      price: parsedPrice,
+      category: rawCategory,
+      stock: Number.isNaN(parsedStock) ? 0 : parsedStock,
+      status: computedStatus,
+      active: isActive,
+      featured: !!featured,
+      image,
       created_at: new Date().toISOString(),
-      sold: 0,
-      rating: 0,
-      reviews: 0
+      updated_at: new Date().toISOString()
     };
 
     const { data: product, error } = await supabase
@@ -119,7 +145,7 @@ router.post('/products', authenticateUser, authenticateAdmin, async (req, res) =
 
     if (error) {
       console.error('Error creating product:', error);
-      return res.status(400).json({ error: 'Failed to create product' });
+      return res.status(400).json({ error: error.message, details: error.details || null, code: error.code || null, hint: error.hint || null });
     }
 
     res.status(201).json(product);
@@ -133,10 +159,33 @@ router.post('/products', authenticateUser, authenticateAdmin, async (req, res) =
 router.put('/products/:id', authenticateUser, authenticateAdmin, async (req, res) => {
   try {
     const { id } = req.params;
-    const updateData = {
-      ...req.body,
-      updated_at: new Date().toISOString()
-    };
+    const { name, description, price, category, stock, stock_quantity, image, active, status, featured } = req.body;
+
+    const updateData = { updated_at: new Date().toISOString() };
+    if (name !== undefined) updateData.name = typeof name === 'string' ? name.trim() : name;
+    if (description !== undefined) updateData.description = description;
+    if (price !== undefined) {
+      const normalized = typeof price === 'number' ? price : Number((price ?? '').toString().replace(/[^\d.,-]/g, '').replace(',', '.'));
+      if (!Number.isNaN(normalized)) updateData.price = normalized;
+    }
+    if (category !== undefined) updateData.category = category;
+
+    if (stock !== undefined || stock_quantity !== undefined) {
+      const s = stock !== undefined ? stock : stock_quantity;
+      const parsed = parseInt(s);
+      if (!Number.isNaN(parsed)) updateData.stock = parsed;
+      updateData.status = parsed > 0 ? 'active' : 'out_of_stock';
+    }
+
+    if (image !== undefined) updateData.image = image;
+    if (featured !== undefined) updateData.featured = !!featured;
+
+    if (active !== undefined) {
+      updateData.active = active;
+    } else if (status !== undefined) {
+      updateData.active = status === 'active';
+      updateData.status = status;
+    }
 
     const { data: product, error } = await supabase
       .from('products')
@@ -147,7 +196,7 @@ router.put('/products/:id', authenticateUser, authenticateAdmin, async (req, res
 
     if (error) {
       console.error('Error updating product:', error);
-      return res.status(400).json({ error: 'Failed to update product' });
+      return res.status(400).json({ error: error.message, details: error.details || null, code: error.code || null, hint: error.hint || null });
     }
 
     res.json(product);
@@ -185,12 +234,13 @@ router.patch('/products/:id/stock', authenticateUser, authenticateAdmin, async (
     const { id } = req.params;
     const { stock } = req.body;
 
-    const status = stock > 0 ? 'active' : 'out_of_stock';
+    const parsed = parseInt(stock);
+    const status = !Number.isNaN(parsed) && parsed > 0 ? 'active' : 'out_of_stock';
 
     const { data: product, error } = await supabase
       .from('products')
       .update({ 
-        stock: parseInt(stock),
+        stock: Number.isNaN(parsed) ? 0 : parsed,
         status,
         updated_at: new Date().toISOString()
       })
@@ -200,7 +250,7 @@ router.patch('/products/:id/stock', authenticateUser, authenticateAdmin, async (
 
     if (error) {
       console.error('Error updating stock:', error);
-      return res.status(400).json({ error: 'Failed to update stock' });
+      return res.status(400).json({ error: error.message, details: error.details || null, code: error.code || null, hint: error.hint || null });
     }
 
     res.json(product);
@@ -529,25 +579,17 @@ router.get('/stats', authenticateUser, authenticateAdmin, async (req, res) => {
 // Get categories
 router.get('/categories', authenticateUser, authenticateAdmin, async (req, res) => {
   try {
-    const { data: categories, error } = await supabase
+    const { data, error } = await supabase
       .from('products')
-      .select('category')
-      .then(result => {
-        const categoryCount = result.data?.reduce((acc, product) => {
-          acc[product.category] = (acc[product.category] || 0) + 1;
-          return acc;
-        }, {}) || {};
-        
-        const categories = Object.entries(categoryCount).map(([name, count]) => ({
-          id: name,
-          name: name.charAt(0).toUpperCase() + name.slice(1),
-          count
-        }));
-        
-        return { data: categories };
-      });
+      .select('category');
 
-    res.json(categories.data || []);
+    if (error) {
+      console.error('Error fetching categories:', error);
+      return res.status(400).json({ error: error.message, details: error.details || null, code: error.code || null, hint: error.hint || null });
+    }
+
+    const uniqueCategories = [...new Set((data || []).map(p => p.category).filter(Boolean))];
+    res.json(uniqueCategories);
   } catch (error) {
     console.error('Error in get categories:', error);
     res.status(500).json({ error: 'Internal server error' });

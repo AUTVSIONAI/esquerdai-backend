@@ -1,5 +1,6 @@
 const express = require('express');
 const { authenticateUser, authenticateAdmin } = require('../middleware/auth');
+const { supabase } = require('../config/supabase');
 const router = express.Router();
 
 // Usar supabase global
@@ -21,11 +22,30 @@ router.get('/overview', authenticateUser, authenticateAdmin, async (req, res) =>
       .from('users')
       .select('plan, created_at')
       .gte('created_at', new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString());
-
-    const activeUsers = userStats?.length || 0;
-    const newUsersThisMonth = userStats?.filter(u => 
-      new Date(u.created_at) > new Date(Date.now() - 30 * 24 * 60 * 60 * 1000)
+    
+    const _legacyActiveUsers = userStats?.length || 0;
+    const _legacyNewUsersThisMonth = userStats?.filter(u => 
+    new Date(u.created_at) > new Date(Date.now() - 30 * 24 * 60 * 60 * 1000)
     ).length || 0;
+    const { data: usersData } = await supabase
+      .from('users')
+      .select('id, created_at, last_login');
+
+    const now = Date.now();
+    const THIRTY_DAYS = 30 * 24 * 60 * 60 * 1000;
+    const startOfMonthDate = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
+    const startOfMonthTs = startOfMonthDate.getTime();
+
+    let activeUsers = 0;
+    let newUsersThisMonth = 0;
+
+    (usersData || []).forEach(u => {
+      const createdTs = u.created_at ? new Date(u.created_at).getTime() : 0;
+      const lastLoginTs = u.last_login ? new Date(u.last_login).getTime() : 0;
+
+      if (lastLoginTs && (now - lastLoginTs) <= THIRTY_DAYS) activeUsers++;
+      if (createdTs && createdTs >= startOfMonthTs) newUsersThisMonth++;
+    });
 
     // Get check-in statistics
     const { data: checkinStats } = await supabase
@@ -44,11 +64,32 @@ router.get('/overview', authenticateUser, authenticateAdmin, async (req, res) =>
     const activeEvents = eventStats?.length || 0;
 
     // Get revenue statistics (mock data for now)
-    const revenue = {
+    const revenueLegacy = {
       today: 1250.00,
       thisMonth: 15750.00,
       growth: 12.5
     };
+    // Get revenue statistics (real data)
+    let revenue = { today: 0, thisMonth: 0, growth: 0 };
+    try {
+      const startOfMonthIso = new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString();
+      const { data: orders } = await supabase
+        .from('orders')
+        .select('total_amount, status, created_at')
+        .gte('created_at', startOfMonthIso);
+      const nowRevenue = Date.now();
+      const DAY_MS = 24 * 60 * 60 * 1000;
+      let monthSum = 0;
+      let todaySum = 0;
+      (orders || []).forEach(o => {
+        const amt = Number(o.total_amount) || 0;
+        monthSum += amt;
+        const ts = o.created_at ? new Date(o.created_at).getTime() : 0;
+        if (ts && nowRevenue - ts <= DAY_MS) todaySum += amt;
+      });
+      revenue.thisMonth = Number(monthSum.toFixed(2));
+      revenue.today = Number(todaySum.toFixed(2));
+    } catch (_) {}
 
     // Get AI conversation statistics
     const { data: aiStats } = await supabase
@@ -70,7 +111,7 @@ router.get('/overview', authenticateUser, authenticateAdmin, async (req, res) =>
     const { data: recentEvents } = await supabase
       .from('events')
       .select('id, title, location, city, state, current_participants, status, created_at')
-      .order('created_at', { ascending: false })
+      .order('id', { ascending: false })
       .limit(5);
 
     // Get top cities by user count
@@ -147,28 +188,21 @@ router.get('/overview', authenticateUser, authenticateAdmin, async (req, res) =>
 // User management
 router.get('/users', authenticateUser, authenticateAdmin, async (req, res) => {
   try {
-    const { plan, status, search, limit = 50, offset = 0 } = req.query;
+    const { plan, status, search, limit = 200, offset = 0 } = req.query;
 
     let query = supabase
       .from('users')
-      .select(`
-        id,
-        email,
-        username,
-        full_name,
-        plan,
-        is_admin,
-        created_at,
-        last_login,
-        points,
-        city,
-        state
-      `)
+      .select('*')
       .order('created_at', { ascending: false })
+      .order('id', { ascending: false })
       .range(parseInt(offset), parseInt(offset) + parseInt(limit) - 1);
 
-    if (plan) {
+    if (plan && plan !== 'all') {
       query = query.eq('plan', plan);
+    }
+
+    if (status && status !== 'all') {
+      query = query.eq('status', status);
     }
 
     if (search) {
@@ -177,28 +211,117 @@ router.get('/users', authenticateUser, authenticateAdmin, async (req, res) => {
 
     const { data: users, error } = await query;
 
+    // Fallback para listar usuários do auth quando tabela users não existe ou está vazia
+    const fallbackListAuthUsers = async () => {
+      try {
+        const perPage = 200;
+        let page = 1;
+        let all = [];
+        let keepGoing = true;
+        while (keepGoing) {
+          const { data: adminList, error: adminError } = await supabase.auth.admin.listUsers({ page, perPage });
+          if (adminError) {
+            console.error('Auth admin listUsers error:', adminError.message || adminError);
+            break;
+          }
+          const usersPage = (adminList?.users || []);
+          const mappedPage = usersPage.map(u => {
+            const role = (u.app_metadata?.role) || (u.user_metadata?.role) || 'user';
+            return {
+              id: u.id,
+              email: u.email,
+              username: u.user_metadata?.username || (u.email ? u.email.split('@')[0] : null),
+              full_name: u.user_metadata?.full_name || (u.email ? u.email.split('@')[0] : null),
+              plan: 'gratuito',
+              role,
+              is_admin: role === 'admin',
+              created_at: u.created_at,
+              last_login: u.last_sign_in_at,
+              points: 0,
+              city: u.user_metadata?.city || null,
+              state: u.user_metadata?.state || null,
+              status: 'active',
+              stats: { checkins: 0, conversations: 0 }
+            };
+          });
+          all = all.concat(mappedPage);
+          if (usersPage.length < perPage) {
+            keepGoing = false;
+          } else {
+            page += 1;
+          }
+        }
+        // Aplicar filtros
+        let filtered = all;
+        if (search) {
+          const s = String(search).toLowerCase();
+          filtered = filtered.filter(x =>
+            (x.email || '').toLowerCase().includes(s) ||
+            (x.username || '').toLowerCase().includes(s) ||
+            (x.full_name || '').toLowerCase().includes(s)
+          );
+        }
+        if (plan && plan !== 'all') {
+          filtered = filtered.filter(x => String(x.plan).toLowerCase() === String(plan).toLowerCase());
+        }
+        if (status && status !== 'all') {
+          filtered = filtered.filter(x => String(x.status).toLowerCase() === String(status).toLowerCase());
+        }
+        const start = parseInt(offset) || 0;
+        const lim = parseInt(limit) || 200;
+        const sliced = filtered.slice(start, start + lim);
+        return sliced;
+      } catch (adminErr) {
+        console.error('Auth admin fallback error:', adminErr?.message || adminErr);
+        return [];
+      }
+    };
+
+    // Preferir listagem via Auth users
+    const authUsers = await fallbackListAuthUsers();
+    return res.json({ users: authUsers });
+
     if (error) {
+      const msg = String(error.message || '').toLowerCase();
+      // Se a tabela não existir, usar fallback do auth
+      if (msg.includes('could not find the table') || msg.includes('relation') || msg.includes('does not exist')) {
+        const authUsers = await fallbackListAuthUsers();
+        return res.json({ users: authUsers });
+      }
       return res.status(400).json({ error: error.message });
     }
 
-    // Get additional statistics for each user
-    const usersWithStats = await Promise.all(
-      users.map(async (user) => {
-        const { data: checkins } = await supabase
-          .from('checkins')
-          .select('id')
-          .eq('user_id', user.id);
+    // Se não há usuários, tentar buscar do auth como fallback
+    if (!users || users.length === 0) {
+      const authUsers = await fallbackListAuthUsers();
+      return res.json({ users: authUsers });
+    }
 
-        const { data: conversations } = await supabase
-          .from('ai_conversations')
-          .select('id')
-          .eq('user_id', user.id);
+    // Get additional statistics for each user (com fallback quando tabelas não existem)
+    const usersWithStats = await Promise.all(
+      (users || []).map(async (user) => {
+        let checkinsCount = 0;
+        let conversationsCount = 0;
+        try {
+          const { data: checkinsData } = await supabase
+            .from('checkins')
+            .select('id')
+            .eq('user_id', user.id);
+          checkinsCount = checkinsData?.length || 0;
+        } catch (_) {}
+        try {
+          const { data: convData } = await supabase
+            .from('ai_conversations')
+            .select('id')
+            .eq('user_id', user.id);
+          conversationsCount = convData?.length || 0;
+        } catch (_) {}
 
         return {
           ...user,
           stats: {
-            checkins: checkins?.length || 0,
-            conversations: conversations?.length || 0
+            checkins: checkinsCount,
+            conversations: conversationsCount
           }
         };
       })
@@ -211,58 +334,335 @@ router.get('/users', authenticateUser, authenticateAdmin, async (req, res) => {
   }
 });
 
+// Sync auth.users into public.users (bulk)
+router.post('/users/sync-auth', authenticateUser, authenticateAdmin, async (req, res) => {
+  try {
+    const perPage = parseInt((req.body && req.body.perPage) || 200);
+    let page = 1;
+    let totalSynced = 0;
+    let finished = false;
+
+    while (!finished) {
+      const { data: adminList, error: adminErr } = await supabase.auth.admin.listUsers({ page, perPage });
+      if (adminErr) {
+        return res.status(400).json({ error: adminErr.message || String(adminErr) });
+      }
+      const users = (adminList && adminList.users) || [];
+      if (users.length === 0) {
+        finished = true;
+        break;
+      }
+
+      for (const u of users) {
+        const email = u.email;
+        const payload = {
+          email,
+          full_name: (u.user_metadata && u.user_metadata.full_name) || (email ? email.split('@')[0] : null),
+          username: (u.user_metadata && u.user_metadata.username) || (email ? email.split('@')[0] : null),
+          city: (u.user_metadata && u.user_metadata.city) || null,
+          state: (u.user_metadata && u.user_metadata.state) || null,
+          plan: 'gratuito',
+          role: (u.app_metadata && u.app_metadata.role) || (u.user_metadata && u.user_metadata.role) || 'user',
+          points: 0,
+          status: 'active',
+          auth_id: u.id,
+          last_login: u.last_sign_in_at,
+          created_at: u.created_at,
+          updated_at: new Date().toISOString()
+        };
+
+        let synced = false;
+
+        // Try upsert by auth_id
+        const { data: up1, error: up1Err } = await supabase
+          .from('users')
+          .upsert(payload, { onConflict: 'auth_id' })
+          .select()
+          .single();
+        if (!up1Err && up1) {
+          synced = true;
+        } else {
+          // Try upsert by email
+          const { data: up2, error: up2Err } = await supabase
+            .from('users')
+            .upsert(payload, { onConflict: 'email' })
+            .select()
+            .single();
+          if (!up2Err && up2) {
+            synced = true;
+          } else {
+            // Try insert
+            const { data: ins, error: insErr } = await supabase
+              .from('users')
+              .insert([payload])
+              .select()
+              .single();
+            if (!insErr && ins) {
+              synced = true;
+            } else {
+              // Try fetch existing
+              const { data: byAuth } = await supabase
+                .from('users')
+                .select('*')
+                .eq('auth_id', u.id)
+                .single();
+              if (byAuth) synced = true;
+              else {
+                const { data: byEmail } = await supabase
+                  .from('users')
+                  .select('*')
+                  .eq('email', email)
+                  .single();
+                if (byEmail) synced = true;
+              }
+            }
+          }
+        }
+
+        if (synced) totalSynced += 1;
+      }
+
+      if (users.length < perPage) {
+        finished = true;
+      } else {
+        page += 1;
+      }
+    }
+
+    res.json({ message: 'Sync complete', synced: totalSynced });
+  } catch (err) {
+    console.error('Sync auth->public error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Sync a single user by email from auth.users into public.users
+router.post('/users/sync-auth-one', authenticateUser, authenticateAdmin, async (req, res) => {
+  try {
+    const { email } = req.body || {};
+    if (!email) return res.status(400).json({ error: 'email is required' });
+
+    // Iterate admin list to find the user by email
+    const perPage = 200;
+    let page = 1;
+    let found = null;
+    let finished = false;
+
+    while (!finished && !found) {
+      const { data: adminList, error: adminErr } = await supabase.auth.admin.listUsers({ page, perPage });
+      if (adminErr) return res.status(400).json({ error: adminErr.message || String(adminErr) });
+      const users = (adminList && adminList.users) || [];
+      for (const u of users) {
+        if (String(u.email || '').toLowerCase() === String(email).toLowerCase()) {
+          found = u;
+          break;
+        }
+      }
+      if (found) break;
+      if (users.length < perPage) finished = true;
+      else page += 1;
+    }
+
+    if (!found) {
+      return res.status(404).json({ error: 'Auth user not found for provided email' });
+    }
+
+    const payload = {
+      email: found.email,
+      full_name: (found.user_metadata && found.user_metadata.full_name) || (found.email ? found.email.split('@')[0] : null),
+      username: (found.user_metadata && found.user_metadata.username) || (found.email ? found.email.split('@')[0] : null),
+      city: (found.user_metadata && found.user_metadata.city) || null,
+      state: (found.user_metadata && found.user_metadata.state) || null,
+      plan: 'gratuito',
+      role: (found.app_metadata && found.app_metadata.role) || (found.user_metadata && found.user_metadata.role) || 'user',
+      points: 0,
+      status: 'active',
+      auth_id: found.id,
+      last_login: found.last_sign_in_at,
+      created_at: found.created_at,
+      updated_at: new Date().toISOString()
+    };
+
+    let dbUser = null;
+
+    const { data: up1, error: up1Err } = await supabase
+      .from('users')
+      .upsert(payload, { onConflict: 'auth_id' })
+      .select()
+      .single();
+    if (!up1Err && up1) {
+      dbUser = up1;
+    } else {
+      const { data: up2, error: up2Err } = await supabase
+        .from('users')
+        .upsert(payload, { onConflict: 'email' })
+        .select()
+        .single();
+      if (!up2Err && up2) {
+        dbUser = up2;
+      } else {
+        const { data: ins, error: insErr } = await supabase
+          .from('users')
+          .insert([payload])
+          .select()
+          .single();
+        if (!insErr && ins) dbUser = ins;
+        else {
+          const { data: byAuth } = await supabase
+            .from('users')
+            .select('*')
+            .eq('auth_id', found.id)
+            .single();
+          dbUser = byAuth || null;
+          if (!dbUser) {
+            const { data: byEmail } = await supabase
+              .from('users')
+              .select('*')
+              .eq('email', found.email)
+              .single();
+            dbUser = byEmail || null;
+          }
+        }
+      }
+    }
+
+    if (!dbUser) return res.status(400).json({ error: 'Failed to sync user into public.users' });
+    res.json({ message: 'User synced', user: dbUser });
+  } catch (err) {
+    console.error('Sync single auth->public error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // Get user details
 router.get('/users/:userId', authenticateUser, authenticateAdmin, async (req, res) => {
   try {
     const { userId } = req.params;
 
-    const { data: user, error } = await supabase
+    // Resolve local user by id or auth_id (Supabase Auth UUID)
+    let user = null;
+    let localUserId = null;
+
+    const { data: byId, error: byIdErr } = await supabase
       .from('users')
       .select('*')
       .eq('id', userId)
       .single();
 
-    if (error || !user) {
+    if (!byIdErr && byId) {
+      user = byId;
+      localUserId = byId.id;
+    } else {
+      const { data: byAuth } = await supabase
+        .from('users')
+        .select('*')
+        .eq('auth_id', userId)
+        .single();
+      if (byAuth) {
+        user = byAuth;
+        localUserId = byAuth.id;
+      }
+    }
+
+    // If no local user, try hydrate from Supabase Auth
+    if (!user) {
+      try {
+        const { data: authRes } = await supabase.auth.admin.getUserById(userId);
+        const authUser = authRes?.user || null;
+        if (authUser) {
+          user = {
+            id: authUser.id,
+            auth_id: authUser.id,
+            email: authUser.email,
+            full_name: authUser.user_metadata?.full_name || (authUser.email ? authUser.email.split('@')[0] : null),
+            username: authUser.user_metadata?.username || (authUser.email ? authUser.email.split('@')[0] : null),
+            city: authUser.user_metadata?.city || null,
+            state: authUser.user_metadata?.state || null,
+            plan: authUser.user_metadata?.plan || 'gratuito',
+            is_admin: Boolean(authUser.user_metadata?.is_admin),
+            points: Number(authUser.user_metadata?.points || 0),
+            created_at: authUser.created_at,
+            last_login: authUser.last_sign_in_at,
+            status: 'active',
+            stats: { checkins: 0, conversations: 0 }
+          };
+          localUserId = null;
+        }
+      } catch (_) {}
+    }
+
+    if (!user) {
       return res.status(404).json({ error: 'User not found' });
     }
 
-    // Get user's check-ins
-    const { data: checkins } = await supabase
-      .from('checkins')
-      .select(`
-        *,
-        events (
-          title,
-          location
-        )
-      `)
-      .eq('user_id', userId)
-      .order('created_at', { ascending: false })
-      .limit(10);
+    // If no local id, return empty related lists
+    let checkins = [];
+    let conversations = [];
+    let orders = [];
+    let adminMeta = null;
+    let roleName = null;
 
-    // Get user's AI conversations
-    const { data: conversations } = await supabase
-      .from('ai_conversations')
-      .select('*')
-      .eq('user_id', userId)
-      .order('created_at', { ascending: false })
-      .limit(10);
+    if (localUserId) {
+      const { data: userCheckins } = await supabase
+        .from('checkins')
+        .select(`
+          *,
+          events (
+            title,
+            location
+          )
+        `)
+        .eq('user_id', localUserId)
+        .order('created_at', { ascending: false })
+        .limit(10);
+      checkins = userCheckins || [];
 
-    // Get user's orders
-    const { data: orders } = await supabase
-      .from('orders')
-      .select('*')
-      .eq('user_id', userId)
-      .order('created_at', { ascending: false })
-      .limit(10);
+      const { data: userConversations } = await supabase
+        .from('ai_conversations')
+        .select('*')
+        .eq('user_id', localUserId)
+        .order('created_at', { ascending: false })
+        .limit(10);
+      conversations = userConversations || [];
+
+      const { data: userOrders } = await supabase
+        .from('orders')
+        .select('*')
+        .eq('user_id', localUserId)
+        .order('created_at', { ascending: false })
+        .limit(10);
+      orders = userOrders || [];
+
+      try {
+        const { data: meta } = await supabase
+          .from('admin_users')
+          .select('*')
+          .eq('user_id', localUserId)
+          .single();
+        adminMeta = meta || null;
+        if (adminMeta?.role_id) {
+          const { data: roleRow } = await supabase
+            .from('admin_roles')
+            .select('name')
+            .eq('id', adminMeta.role_id)
+            .single();
+          roleName = roleRow?.name || null;
+        }
+      } catch (_) {}
+    }
 
     res.json({
       user,
       activity: {
-        checkins: checkins || [],
-        conversations: conversations || [],
-        orders: orders || []
-      }
+        checkins,
+        conversations,
+        orders
+      },
+      role_id: adminMeta?.role_id || null,
+      role: roleName,
+      department: adminMeta?.department || null,
+      permissions: adminMeta?.permissions || [],
+      is_active: adminMeta?.is_active ?? false
     });
   } catch (error) {
     console.error('Get user details error:', error);
@@ -298,15 +698,68 @@ router.put('/users/:userId', authenticateUser, authenticateAdmin, async (req, re
     if (is_admin !== undefined) updateData.is_admin = is_admin;
     if (points !== undefined) updateData.points = points;
 
+    // Resolve column to update (local id or auth_id)
+    let whereCol = 'id';
+    let whereVal = userId;
+
+    const { data: existsById } = await supabase
+      .from('users')
+      .select('id')
+      .eq('id', userId)
+      .single();
+
+    if (!existsById) {
+      const { data: existsByAuth } = await supabase
+        .from('users')
+        .select('id, auth_id')
+        .eq('auth_id', userId)
+        .single();
+      if (existsByAuth) {
+        whereCol = 'auth_id';
+        whereVal = userId;
+      } else {
+        // No local record: try creating from Supabase Auth
+        try {
+          const { data: authRes } = await supabase.auth.admin.getUserById(userId);
+          const authUser = authRes?.user || null;
+          if (authUser) {
+            const insertPayload = {
+              auth_id: authUser.id,
+              email: authUser.email,
+              full_name: authUser.user_metadata?.full_name || (authUser.email ? authUser.email.split('@')[0] : null),
+              username: authUser.user_metadata?.username || (authUser.email ? authUser.email.split('@')[0] : null),
+              city: authUser.user_metadata?.city || null,
+              state: authUser.user_metadata?.state || null,
+              plan: authUser.user_metadata?.plan || 'gratuito',
+              is_admin: Boolean(authUser.user_metadata?.is_admin),
+              points: Number(authUser.user_metadata?.points || 0),
+              created_at: authUser.created_at,
+              last_login: authUser.last_sign_in_at,
+              status: 'active',
+              stats: { checkins: 0, conversations: 0 }
+            };
+            await supabase.from('users').upsert(insertPayload, { onConflict: 'auth_id' });
+            whereCol = 'auth_id';
+            whereVal = userId;
+          }
+        } catch (_) {}
+      }
+    }
+
     const { data: user, error } = await supabase
       .from('users')
       .update(updateData)
-      .eq('id', userId)
+      .eq(whereCol, whereVal)
       .select()
       .single();
 
     if (error) {
-      return res.status(400).json({ error: error.message });
+      return res.status(400).json({ 
+        error: error.message, 
+        details: error.details || null, 
+        code: error.code || null, 
+        hint: error.hint || null 
+      });
     }
 
     res.json({ user, message: 'User updated successfully' });
@@ -525,31 +978,47 @@ router.get('/store/products', authenticateUser, authenticateAdmin, async (req, r
 // Create product
 router.post('/store/products', authenticateUser, authenticateAdmin, async (req, res) => {
   try {
-    const { name, description, price, category, stock_quantity, image } = req.body;
+    const { name, description, price, category, stock, stock_quantity, image, status, active } = req.body;
 
-    if (!name || !price || !category) {
+    const rawName = typeof name === 'string' ? name.trim() : '';
+    const rawCategory = typeof category === 'string' ? category.trim() : '';
+
+    const normalizedPrice = typeof price === 'number'
+      ? price
+      : Number((price ?? '').toString().replace(/[^\d.,-]/g, '').replace(',', '.'));
+    const parsedPrice = Number.isNaN(normalizedPrice) ? NaN : normalizedPrice;
+
+    if (!rawName || Number.isNaN(parsedPrice) || !rawCategory) {
       return res.status(400).json({ error: 'Name, price, and category are required' });
     }
+
+    const parsedStockInput = stock !== undefined ? stock : stock_quantity;
+    const parsedStock = parsedStockInput !== undefined ? parseInt(parsedStockInput) : 0;
+
+    const isActive = typeof active === 'boolean' ? active : (status ? status === 'active' : true);
+    const computedStatus = status || ((parsedStock || 0) > 0 ? 'active' : 'out_of_stock');
 
     const { data: product, error } = await supabase
       .from('products')
       .insert([
         {
-          name,
+          name: rawName,
           description,
-          price: parseFloat(price),
-          category,
-          stock_quantity: parseInt(stock_quantity) || 0,
+          price: parsedPrice,
+          category: rawCategory,
+          stock: Number.isNaN(parsedStock) ? 0 : parsedStock,
+          status: computedStatus,
+          active: isActive,
           image,
-          active: true,
-          created_at: new Date().toISOString()
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString()
         }
       ])
       .select()
       .single();
 
     if (error) {
-      return res.status(400).json({ error: error.message });
+      return res.status(400).json({ error: error.message, details: error.details || null, code: error.code || null, hint: error.hint || null });
     }
 
     res.status(201).json({ product, message: 'Product created successfully' });
@@ -563,16 +1032,34 @@ router.post('/store/products', authenticateUser, authenticateAdmin, async (req, 
 router.put('/store/products/:productId', authenticateUser, authenticateAdmin, async (req, res) => {
   try {
     const { productId } = req.params;
-    const { name, description, price, category, stock_quantity, image, active } = req.body;
+    const { name, description, price, category, stock, stock_quantity, image, active, status } = req.body;
 
     const updateData = {};
-    if (name !== undefined) updateData.name = name;
+    if (name !== undefined) updateData.name = typeof name === 'string' ? name.trim() : name;
     if (description !== undefined) updateData.description = description;
-    if (price !== undefined) updateData.price = parseFloat(price);
+    if (price !== undefined) {
+      const normalized = typeof price === 'number' ? price : Number((price ?? '').toString().replace(/[^\d.,-]/g, '').replace(',', '.'));
+      if (!Number.isNaN(normalized)) updateData.price = normalized;
+    }
     if (category !== undefined) updateData.category = category;
-    if (stock_quantity !== undefined) updateData.stock_quantity = parseInt(stock_quantity);
+
+    if (stock !== undefined || stock_quantity !== undefined) {
+      const s = stock !== undefined ? stock : stock_quantity;
+      const parsed = parseInt(s);
+      if (!Number.isNaN(parsed)) updateData.stock = parsed;
+      updateData.status = parsed > 0 ? 'active' : 'out_of_stock';
+    }
+
     if (image !== undefined) updateData.image = image;
-    if (active !== undefined) updateData.active = active;
+
+    if (active !== undefined) {
+      updateData.active = active;
+    } else if (status !== undefined) {
+      updateData.active = status === 'active';
+      updateData.status = status;
+    }
+
+    updateData.updated_at = new Date().toISOString();
 
     const { data: product, error } = await supabase
       .from('products')
@@ -582,7 +1069,7 @@ router.put('/store/products/:productId', authenticateUser, authenticateAdmin, as
       .single();
 
     if (error) {
-      return res.status(400).json({ error: error.message });
+      return res.status(400).json({ error: error.message, details: error.details || null, code: error.code || null, hint: error.hint || null });
     }
 
     res.json({ product, message: 'Product updated successfully' });
@@ -929,7 +1416,7 @@ router.get('/announcements', authenticateUser, authenticateAdmin, async (req, re
 // Live Map endpoints
 router.get('/live-map/users', authenticateUser, authenticateAdmin, async (req, res) => {
   try {
-    // Get users with real location data
+    // Get users with location data using latitude/longitude columns if available
     const { data: users, error } = await supabase
       .from('users')
       .select(`
@@ -943,30 +1430,29 @@ router.get('/live-map/users', authenticateUser, authenticateAdmin, async (req, r
         longitude,
         last_login
       `)
-      .not('latitude', 'is', null)
-      .not('longitude', 'is', null)
       .order('last_login', { ascending: false })
       .limit(100);
 
     if (error) {
-      return res.status(400).json({ error: error.message });
+      console.warn('Live map users query error:', error.message);
+      return res.json({ users: [] });
     }
 
-    const formattedUsers = users.map((user) => {
+    const formattedUsers = (users || []).map((user) => {
       return {
         id: user.id,
-        username: user.username || user.email.split('@')[0],
+        username: user.username || (user.email ? user.email.split('@')[0] : ''),
         location: {
           city: user.city,
           state: user.state,
-          lat: user.latitude,
-          lng: user.longitude
+          lat: user.latitude ?? null,
+          lng: user.longitude ?? null
         },
         status: 'online',
         lastActivity: user.last_login,
         plan: user.plan || 'gratuito'
       };
-    });
+    }).filter(u => u.location.lat != null && u.location.lng != null);
 
     res.json({ users: formattedUsers });
   } catch (error) {
@@ -977,46 +1463,43 @@ router.get('/live-map/users', authenticateUser, authenticateAdmin, async (req, r
 
 router.get('/live-map/events', authenticateUser, authenticateAdmin, async (req, res) => {
   try {
-    // Get active events with real location data
+    // Get active events with location (latitude/longitude) and date
     const { data: activeEvents, error } = await supabase
       .from('events')
       .select(`
         id,
         title,
         description,
-        location,
         city,
         state,
         latitude,
         longitude,
-        start_time,
-        end_time,
+        date,
         status,
         current_participants
       `)
-      .eq('status', 'active')
-      .not('latitude', 'is', null)
-      .not('longitude', 'is', null)
-      .order('start_time', { ascending: true });
+      .in('status', ['active', 'ativo'])
+      .order('date', { ascending: true });
 
     if (error) {
-      return res.status(400).json({ error: error.message });
+      console.warn('Live map events query error:', error.message);
+      return res.json({ events: [] });
     }
 
-    const formattedEvents = activeEvents.map((event) => ({
+    const formattedEvents = (activeEvents || []).map((event) => ({
       id: event.id,
       title: event.title,
       location: {
         city: event.city,
         state: event.state,
-        lat: event.latitude,
-        lng: event.longitude
+        lat: event.latitude ?? null,
+        lng: event.longitude ?? null
       },
       participants: event.current_participants || 0,
       status: event.status,
-      startTime: event.start_time,
-      endTime: event.end_time
-    }));
+      startTime: event.date,
+      endTime: null
+    })).filter(e => e.location.lat != null && e.location.lng != null);
 
     res.json({ events: formattedEvents });
   } catch (error) {
@@ -1191,3 +1674,624 @@ router.get('/city-stats', authenticateUser, authenticateAdmin, async (req, res) 
 });
 
 module.exports = router;
+
+// Dashboard stats summary (resiliente)
+router.get('/dashboard/stats', authenticateUser, authenticateAdmin, async (req, res) => {
+  try {
+    const safeLen = async (table) => {
+      try {
+        const { data } = await supabase.from(table).select('id');
+        return data?.length || 0;
+      } catch (_) {
+        return 0;
+      }
+    };
+
+    const [users, events, checkins, manifestations] = await Promise.all([
+      safeLen('users'),
+      safeLen('events'),
+      safeLen('checkins'),
+      safeLen('manifestations')
+    ]);
+
+    res.json({
+      stats: {
+        users,
+        events,
+        checkins,
+        manifestations,
+        lastUpdate: new Date().toISOString()
+      }
+    });
+  } catch (error) {
+    console.error('Dashboard stats error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Permissions (temporary static list to support frontend)
+router.get('/permissions', authenticateUser, authenticateAdmin, async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('admin_permissions')
+      .select('*')
+      .order('resource', { ascending: true });
+
+    if (!error && Array.isArray(data) && data.length) {
+      return res.json(data);
+    }
+
+    const fallback = [
+      { id: 'users.read', resource: 'users', action: 'read', description: 'Ler usuários' },
+      { id: 'users.update', resource: 'users', action: 'update', description: 'Atualizar usuários' },
+      { id: 'users.delete', resource: 'users', action: 'delete', description: 'Excluir usuários' },
+      { id: 'events.create', resource: 'events', action: 'create', description: 'Criar eventos' },
+      { id: 'events.manage', resource: 'events', action: 'manage', description: 'Gerenciar eventos' },
+      { id: 'content.moderate', resource: 'content', action: 'moderate', description: 'Moderar conteúdo' },
+      { id: 'analytics.read', resource: 'analytics', action: 'read', description: 'Ler análises' },
+      { id: 'ai.manage', resource: 'ai', action: 'manage', description: 'Gerenciar IA' }
+    ];
+    res.json(fallback);
+  } catch (error) {
+    console.error('Get permissions error:', error);
+    const fallback = [
+      { id: 'users.read', resource: 'users', action: 'read', description: 'Ler usuários' },
+      { id: 'users.update', resource: 'users', action: 'update', description: 'Atualizar usuários' },
+      { id: 'users.delete', resource: 'users', action: 'delete', description: 'Excluir usuários' },
+      { id: 'events.create', resource: 'events', action: 'create', description: 'Criar eventos' },
+      { id: 'events.manage', resource: 'events', action: 'manage', description: 'Gerenciar eventos' },
+      { id: 'content.moderate', resource: 'content', action: 'moderate', description: 'Moderar conteúdo' },
+      { id: 'analytics.read', resource: 'analytics', action: 'read', description: 'Ler análises' },
+      { id: 'ai.manage', resource: 'ai', action: 'manage', description: 'Gerenciar IA' }
+    ];
+    res.json(fallback);
+  }
+});
+// Roles CRUD
+router.get('/roles', authenticateUser, authenticateAdmin, async (req, res) => {
+  try {
+    const supabase = getSupabase();
+    const { data: roles, error: rolesError } = await supabase
+      .from('admin_roles')
+      .select('*')
+      .order('level', { ascending: true });
+    if (rolesError) return res.status(400).json({ error: rolesError.message });
+
+    const { data: mappings } = await supabase
+      .from('admin_role_permissions')
+      .select('*');
+    const { data: perms } = await supabase
+      .from('admin_permissions')
+      .select('*');
+
+    const permById = {};
+    (perms || []).forEach(p => { permById[p.id] = p; });
+
+    const result = (roles || []).map(r => ({
+      ...r,
+      permissions: (mappings || [])
+        .filter(m => m.role_id === r.id)
+        .map(m => permById[m.permission_id] || { id: m.permission_id })
+    }));
+
+    res.json(result);
+  } catch (error) {
+    console.error('Get roles error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+router.post('/roles', authenticateUser, authenticateAdmin, async (req, res) => {
+  try {
+    const supabase = getSupabase();
+    const { name, description, level = 1, permissions = [] } = req.body || {};
+    if (!name) return res.status(400).json({ error: 'name is required' });
+
+    const { data: newRole, error } = await supabase
+      .from('admin_roles')
+      .insert({ name, description, level })
+      .select()
+      .single();
+    if (error) return res.status(400).json({ error: error.message });
+
+    if (Array.isArray(permissions) && permissions.length) {
+      for (const pid of permissions) {
+        await supabase
+          .from('admin_role_permissions')
+          .insert({ role_id: newRole.id, permission_id: pid });
+      }
+    }
+
+    res.json(newRole);
+  } catch (error) {
+    console.error('Create role error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+router.patch('/roles/:roleId', authenticateUser, authenticateAdmin, async (req, res) => {
+  try {
+    const supabase = getSupabase();
+    const { roleId } = req.params;
+    const { name, description, level, permissions } = req.body || {};
+
+    const update = {};
+    if (name !== undefined) update.name = name;
+    if (description !== undefined) update.description = description;
+    if (level !== undefined) update.level = level;
+
+    let updatedRole = null;
+    if (Object.keys(update).length) {
+      const { data, error } = await supabase
+        .from('admin_roles')
+        .update(update)
+        .eq('id', roleId)
+        .select()
+        .single();
+      if (error) return res.status(400).json({ error: error.message });
+      updatedRole = data;
+    }
+
+    if (Array.isArray(permissions)) {
+      await supabase.from('admin_role_permissions').delete().eq('role_id', roleId);
+      for (const pid of permissions) {
+        await supabase.from('admin_role_permissions').insert({ role_id: roleId, permission_id: pid });
+      }
+    }
+
+    res.json(updatedRole || { id: roleId, ...update });
+  } catch (error) {
+    console.error('Update role error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+router.delete('/roles/:roleId', authenticateUser, authenticateAdmin, async (req, res) => {
+  try {
+    const supabase = getSupabase();
+    const { roleId } = req.params;
+
+    await supabase.from('admin_role_permissions').delete().eq('role_id', roleId);
+    const { error } = await supabase.from('admin_roles').delete().eq('id', roleId);
+    if (error) return res.status(400).json({ error: error.message });
+
+    res.json({ message: 'Role deleted' });
+  } catch (error) {
+    console.error('Delete role error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Assign/Remove role to user
+router.post('/users/:userId/roles/:roleId', authenticateUser, authenticateAdmin, async (req, res) => {
+  try {
+    const supabase = getSupabase();
+    const { userId, roleId } = req.params;
+    const { department, is_active = true, permissions = [] } = req.body || {};
+
+    const payload = { user_id: userId, role_id: roleId, department, is_active, permissions };
+
+    const { data, error } = await supabase
+      .from('admin_users')
+      .upsert(payload, { onConflict: 'user_id' })
+      .select()
+      .single();
+
+    if (error) return res.status(400).json({ error: error.message });
+
+    res.json(data);
+  } catch (error) {
+    console.error('Assign role to user error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+router.delete('/users/:userId/roles/:roleId', authenticateUser, authenticateAdmin, async (req, res) => {
+  try {
+    const supabase = getSupabase();
+    const { userId, roleId } = req.params;
+
+    const { error } = await supabase
+      .from('admin_users')
+      .delete()
+      .eq('user_id', userId)
+      .eq('role_id', roleId);
+    if (error) return res.status(400).json({ error: error.message });
+
+    res.json({ message: 'Role removed from user' });
+  } catch (error) {
+    console.error('Remove role from user error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Update admin metadata for user
+router.patch('/users/:userId', authenticateUser, authenticateAdmin, async (req, res) => {
+  try {
+    const supabase = getSupabase();
+    const { userId } = req.params;
+    const { role, department, permissions, is_active } = req.body || {};
+
+    const update = {};
+    // Accept role as id (uuid) or name; resolve to id
+    let resolvedRoleId = undefined;
+    if (role !== undefined) {
+      const roleStr = String(role || '').trim();
+      const uuidLike = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(roleStr);
+      if (uuidLike) {
+        resolvedRoleId = roleStr;
+      } else if (roleStr) {
+        const { data: roleByName } = await supabase
+          .from('admin_roles')
+          .select('id')
+          .eq('name', roleStr)
+          .single();
+        resolvedRoleId = roleByName?.id;
+        if (!resolvedRoleId) {
+          // Tentar mapear nomes do frontend para papéis canônicos
+          const CANONICAL_MAP = { politico: 'support', partido: 'admin', jornalista: 'moderator' };
+          const mappedName = CANONICAL_MAP[roleStr] || null;
+          if (mappedName) {
+            const { data: roleByCanonical } = await supabase
+              .from('admin_roles')
+              .select('id')
+              .eq('name', mappedName)
+              .single();
+            resolvedRoleId = roleByCanonical?.id || undefined;
+          }
+          // Evitar criar para nomes canônicos; criar apenas se for um nome não mapeado
+          if (!resolvedRoleId && !mappedName) {
+            const { data: createdRole, error: createErr } = await supabase
+              .from('admin_roles')
+              .insert({ name: roleStr, description: null, permissions: [], level: 1 })
+              .select('id')
+              .single();
+            if (createErr || !createdRole?.id) {
+              return res.status(400).json({ error: 'Invalid role: not found and could not be created' });
+            }
+            resolvedRoleId = createdRole.id;
+          }
+        }
+      }
+      if (resolvedRoleId) {
+        update.role_id = resolvedRoleId;
+      }
+    }
+    if (department !== undefined) update.department = department;
+    if (permissions !== undefined) update.permissions = Array.isArray(permissions) ? permissions : [];
+    if (is_active !== undefined) update.is_active = is_active === true;
+
+    if (!Object.keys(update).length) return res.json({ message: 'No changes' });
+
+    // Resolve local users.id for admin_users reference
+    let targetId = null;
+    const { data: byLocal } = await supabase
+      .from('users')
+      .select('id')
+      .eq('id', userId)
+      .single();
+    if (byLocal?.id) {
+      targetId = byLocal.id;
+    } else {
+      const { data: byAuth } = await supabase
+        .from('users')
+        .select('id')
+        .eq('auth_id', userId)
+        .single();
+      if (byAuth?.id) targetId = byAuth.id;
+    }
+
+    if (!targetId) return res.status(404).json({ error: 'User not found' });
+
+    // Try update admin_users; if missing, upsert
+    let data = null;
+    let error = null;
+    const upd = await supabase
+      .from('admin_users')
+      .update(update)
+      .eq('user_id', targetId)
+      .select()
+      .single();
+    data = upd.data; error = upd.error;
+
+    if (error || !data) {
+      const upsert = await supabase
+        .from('admin_users')
+        .upsert({ user_id: targetId, ...update }, { onConflict: 'user_id' })
+        .select()
+        .single();
+      data = upsert.data; error = upsert.error;
+    }
+
+    if (error) return res.status(400).json({ error: error.message, details: error.details || null, code: error.code || null, hint: error.hint || null });
+
+    res.json({ admin: data });
+  } catch (error) {
+    console.error('Patch admin user error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+// Create user (admin)
+router.post('/users', authenticateUser, authenticateAdmin, async (req, res) => {
+  try {
+    // Support two payload types:
+    // 1) Create normal user: { email, password?, full_name?, ... }
+    // 2) Create admin metadata: { user_id, role?, department?, permissions?, is_active? }
+    const { user_id, role, roleId, department, permissions = [], is_active = true } = req.body || {};
+    const { email, password, full_name, username, city, state, plan = 'gratuito', is_admin = false, points = 0 } = req.body || {};
+
+    // Branch: admin metadata creation when no email and a user identifier is provided
+    if (!email && user_id) {
+      const supabase = getSupabase();
+
+      // Resolve target users.id from local id or auth_id
+      let targetId = null;
+      const { data: byLocal } = await supabase.from('users').select('id').eq('id', user_id).single();
+      if (byLocal?.id) {
+        targetId = byLocal.id;
+      } else {
+        const { data: byAuth } = await supabase.from('users').select('id').eq('auth_id', user_id).single();
+        if (byAuth?.id) targetId = byAuth.id;
+      }
+      if (!targetId) return res.status(404).json({ error: 'User not found' });
+
+      // Resolve role id by uuid or name
+      let resolvedRoleId = roleId || null;
+      if (!resolvedRoleId && role) {
+        const roleStr = String(role || '').trim();
+        const uuidLike = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(roleStr);
+        if (uuidLike) {
+          resolvedRoleId = roleStr;
+        } else {
+          const { data: roleByName } = await supabase.from('admin_roles').select('id').eq('name', roleStr).single();
+          resolvedRoleId = roleByName?.id || null;
+          if (!resolvedRoleId) {
+            // Mapear nomes do frontend para papéis canônicos
+            const CANONICAL_MAP = { politico: 'support', partido: 'admin', jornalista: 'moderator' };
+            const mappedName = CANONICAL_MAP[roleStr] || null;
+            if (mappedName) {
+              const { data: roleByCanonical } = await supabase
+                .from('admin_roles')
+                .select('id')
+                .eq('name', mappedName)
+                .single();
+              resolvedRoleId = roleByCanonical?.id || null;
+            }
+            // Evitar criação para nomes canônicos; criar apenas se for não mapeado
+            if (!resolvedRoleId && !mappedName) {
+              const { data: createdRole, error: createErr } = await supabase
+                .from('admin_roles')
+                .insert({ name: roleStr, description: null, permissions: [], level: 1 })
+                .select('id')
+                .single();
+              if (createErr || !createdRole?.id) {
+                return res.status(400).json({ error: 'Invalid role: not found and could not be created' });
+              }
+              resolvedRoleId = createdRole.id;
+            }
+          }
+        }
+      }
+
+      // Upsert into admin_users
+      const payload = {
+        user_id: targetId,
+        ...(resolvedRoleId ? { role_id: resolvedRoleId } : {}),
+        ...(department !== undefined ? { department } : {}),
+        ...(Array.isArray(permissions) ? { permissions } : {}),
+        is_active: is_active !== false
+      };
+      const { data, error } = await supabase
+        .from('admin_users')
+        .upsert(payload, { onConflict: 'user_id' })
+        .select()
+        .single();
+      if (error) return res.status(400).json({ error: error.message });
+      return res.status(201).json({ admin: data });
+    }
+
+    if (!email) return res.status(400).json({ error: 'email is required' });
+
+    // Create in Supabase Auth (support creation without password)
+    let authUser = null;
+    try {
+      if (password && String(password).length >= 6) {
+        const { data: created, error: authError } = await supabase.auth.admin.createUser({
+          email,
+          password,
+          email_confirm: true,
+          user_metadata: { full_name, username, city, state, plan, is_admin, points }
+        });
+        if (authError) return res.status(400).json({ error: authError.message, code: authError.status || 400 });
+        authUser = created?.user || null;
+      } else {
+        // Create user without password; no email sent, can set password later
+        const { data: createdNoPass, error: createNoPassError } = await supabase.auth.admin.createUser({
+          email,
+          email_confirm: false,
+          user_metadata: { full_name, username, city, state, plan, is_admin, points }
+        });
+        if (createNoPassError) {
+          // If user already exists, try to fetch existing by email
+          const msg = String(createNoPassError.message || '').toLowerCase();
+          if (msg.includes('already') && msg.includes('registered')) {
+            try {
+              const perPage = 200;
+              const { data: list } = await supabase.auth.admin.listUsers({ page: 1, perPage });
+              const existing = (list?.users || []).find(u => String(u.email || '').toLowerCase() === String(email).toLowerCase());
+              if (existing) {
+                authUser = existing;
+              } else {
+                return res.status(409).json({ error: 'User already exists but could not be retrieved', code: 409 });
+              }
+            } catch (listErr) {
+              return res.status(409).json({ error: 'User already exists', details: listErr?.message || null, code: 409 });
+            }
+          } else {
+            return res.status(400).json({ error: createNoPassError.message, code: createNoPassError.status || 400 });
+          }
+        } else {
+          authUser = createdNoPass?.user || null;
+        }
+      }
+    } catch (authEx) {
+      console.warn('⚠️ Supabase Auth createUser falhou, prosseguindo com criação apenas em public.users:', authEx?.message);
+      authUser = null;
+    }
+
+    if (!authUser) {
+      // Fallback: continuar criação somente na tabela public.users sem auth
+      console.warn('⚠️ Auth admin.createUser falhou; prosseguindo com criação em public.users sem auth_id');
+    }
+
+    // Try persisting in public users table (upsert by auth_id)
+    let dbUser = null;
+    try {
+      const insertPayloadBase = {
+        email,
+        full_name: full_name ?? (email ? email.split('@')[0] : null),
+        username: username ?? (email ? email.split('@')[0] : null),
+        city: city ?? null,
+        state: state ?? null,
+        plan,
+        is_admin,
+        points,
+        status: 'active',
+        stats: { checkins: 0, conversations: 0 }
+      };
+      const insertPayload = {
+        ...insertPayloadBase,
+        auth_id: authUser?.id ?? null,
+        created_at: authUser?.created_at ?? new Date().toISOString(),
+        last_login: authUser?.last_sign_in_at ?? null
+      };
+
+      if (authUser?.id) {
+        // Upsert por auth_id quando temos usuário de auth
+        let upsertError = null;
+        const { data, error } = await supabase
+          .from('users')
+          .upsert(insertPayload, { onConflict: 'auth_id' })
+          .select()
+          .single();
+        if (!error && data) {
+          dbUser = data;
+        } else {
+          upsertError = error;
+          // Tentar upsert por email se não houver restrição única em auth_id
+          const { data: byEmailUpsert, error: emailUpsertErr } = await supabase
+            .from('users')
+            .upsert(insertPayload, { onConflict: 'email' })
+            .select()
+            .single();
+          if (!emailUpsertErr && byEmailUpsert) {
+            dbUser = byEmailUpsert;
+          } else {
+            // Fallback: tentar insert direto
+            const { data: inserted, error: insertErr } = await supabase
+              .from('users')
+              .insert([insertPayload])
+              .select()
+              .single();
+            if (insertErr) {
+              // Fallback final: buscar por auth_id ou email
+              const { data: fetchedByAuth } = await supabase
+                .from('users')
+                .select('*')
+                .eq('auth_id', authUser.id)
+                .single();
+              if (fetchedByAuth) dbUser = fetchedByAuth;
+              else {
+                const { data: fetchedByEmail } = await supabase
+                  .from('users')
+                  .select('*')
+                  .eq('email', email)
+                  .single();
+                if (fetchedByEmail) dbUser = fetchedByEmail;
+              }
+            } else {
+              dbUser = inserted || null;
+            }
+          }
+        }
+      } else {
+        // Sem auth_id válido: inserir diretamente
+        const { data: inserted, error: insertErr } = await supabase
+          .from('users')
+          .insert([insertPayload])
+          .select()
+          .single();
+        if (insertErr) {
+          // Se falhar, tentar localizar por email para evitar duplicidade
+          const { data: byEmail } = await supabase
+            .from('users')
+            .select('*')
+            .eq('email', email)
+            .single();
+          dbUser = byEmail || null;
+        } else {
+          dbUser = inserted || null;
+        }
+      }
+    } catch (_) {}
+
+    // Optionally assign role to user
+    let resolvedRoleId = roleId || null;
+    let resolvedRoleName = null;
+    try {
+      const roleName = role;
+      const adminPerms = Array.isArray(permissions) ? permissions : [];
+      if (!resolvedRoleId && roleName) {
+        // Try resolve by id first, then by name
+        const { data: byId } = await supabase
+          .from('admin_roles')
+          .select('id, name')
+          .eq('id', roleName)
+          .single();
+        if (byId?.id) {
+          resolvedRoleId = byId.id;
+          resolvedRoleName = byId.name;
+        } else {
+          const { data: byName } = await supabase
+            .from('admin_roles')
+            .select('id, name')
+            .eq('name', roleName)
+            .single();
+          if (byName?.id) {
+            resolvedRoleId = byName.id;
+            resolvedRoleName = byName.name;
+          }
+        }
+      }
+      if (resolvedRoleId && dbUser?.id) {
+        const { data: adminRow } = await supabase
+          .from('admin_users')
+          .upsert({ user_id: dbUser.id, role_id: resolvedRoleId, department, is_active, permissions: adminPerms }, { onConflict: 'user_id' })
+          .select()
+          .single();
+        resolvedRoleName = resolvedRoleName || (adminRow ? null : null);
+      }
+    } catch (_) {}
+
+    const responseUser = dbUser || {
+      id: authUser.id,
+      email: authUser.email,
+      full_name: full_name ?? (email ? email.split('@')[0] : null),
+      username: username ?? (email ? email.split('@')[0] : null),
+      city: city ?? null,
+      state: state ?? null,
+      plan,
+      is_admin,
+      points,
+      created_at: authUser.created_at,
+      last_login: authUser.last_sign_in_at,
+      status: 'active',
+      stats: { checkins: 0, conversations: 0 }
+    };
+
+    res.status(201).json({ user: responseUser, role_id: resolvedRoleId, role: resolvedRoleName || roleName || null, message: 'User created successfully' });
+  } catch (error) {
+    console.error('Create user error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});

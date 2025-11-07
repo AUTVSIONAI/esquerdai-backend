@@ -1,23 +1,35 @@
 const express = require('express');
 const { supabase } = require('../config/supabase');
-const { authenticateUser } = require('../middleware/auth');
+const { authenticateUser, optionalAuthenticateUser, resolveUserId } = require('../middleware/auth');
 const router = express.Router();
 
 // Get user profile
 router.get('/profile', authenticateUser, async (req, res) => {
   try {
     console.log('📋 Getting profile for user:', req.user.email);
-    
-    // O req.user já contém todos os dados do usuário vindos do middleware
-    // Não precisamos fazer outra consulta
+
+    // Buscar perfil completo na tabela users usando o ID do banco
+    const { data: dbUser, error: dbError } = await supabase
+      .from('users')
+      .select('*')
+      .eq('id', req.user.id)
+      .single();
+
+    if (dbError || !dbUser) {
+      console.warn('⚠️ Falha ao buscar perfil completo, retornando dados básicos do middleware:', dbError?.message);
+      const profile = { ...req.user };
+      return res.json(profile);
+    }
+
+    // Mesclar dados básicos do middleware (auth_id etc.) com o registro do banco
     const profile = {
-      ...req.user,
-      // Remover campos sensíveis se necessário
-      // password: undefined,
-      // stripe_customer_id: undefined
+      ...dbUser,
+      auth_id: req.user.auth_id || dbUser.auth_id,
+      email: dbUser.email || req.user.email,
+      role: dbUser.role || req.user.role,
     };
-    
-    console.log('✅ Profile retrieved successfully');
+
+    console.log('✅ Profile retrieved successfully from DB');
     res.json(profile);
   } catch (error) {
     console.error('Get profile error:', error);
@@ -31,42 +43,88 @@ router.put('/profile', authenticateUser, async (req, res) => {
     console.log('📝 Profile update request for user:', req.user.id);
     console.log('📝 Request body:', req.body);
     
-    const { username, full_name, bio, city, state, phone, birth_date } = req.body;
-
-    // Validate required fields
-    if (!username || !full_name) {
-      console.log('❌ Missing required fields: username or full_name');
-      return res.status(400).json({ error: 'Username and full name are required' });
+    // Construir updateData apenas com campos presentes no body
+    const candidateFields = ['username', 'full_name', 'bio', 'city', 'state', 'phone', 'birth_date', 'avatar_url'];
+    let updateData = {};
+    for (const key of candidateFields) {
+      if (Object.prototype.hasOwnProperty.call(req.body, key)) {
+        const val = req.body[key];
+        if (val !== undefined && val !== null && val !== '') {
+          updateData[key] = val;
+        }
+      }
     }
 
-    const updateData = {
-      username,
-      full_name,
-      bio,
-      city,
-      state,
-      phone,
-      birth_date,
-      updated_at: new Date().toISOString(),
-    };
+    // NÃO filtrar por req.user; tentar atualizar e remover colunas inválidas dinamicamente
+    if (Object.keys(updateData).length === 0) {
+      console.log('ℹ️ Nenhuma alteração no perfil após construção; respondendo sucesso.');
+      return res.json({ message: 'No changes', profile: req.user });
+    }
 
-    console.log('📝 Update data:', updateData);
+    console.log('📝 Update data (prepared):', updateData);
     console.log('🔍 User ID from req.user:', req.user.id);
 
-    const { data, error } = await supabase
-      .from('users')
-      .update(updateData)
-      .eq('id', req.user.id)
-      .select()
-      .single();
+    // Tentar atualizar e remover campos inexistentes dinamicamente se necessário
+    let attempts = 0;
+    const maxAttempts = Object.keys(updateData).length + 3;
+    let lastError = null;
+    let result = null;
 
-    if (error) {
-      console.log('❌ Supabase update error:', error);
-      return res.status(400).json({ error: error.message });
+    while (attempts < maxAttempts) {
+      const { data, error } = await supabase
+        .from('users')
+        .update(updateData)
+        .eq('id', req.user.id)
+        .select()
+        .single();
+
+      if (!error) {
+        result = data;
+        lastError = null;
+        break;
+      }
+
+      lastError = error;
+      console.log('❌ Supabase update error (attempt', attempts + 1, '):', error);
+
+      // Detectar coluna inexistente e removê-la do update
+      const msg = error?.message || '';
+      const missingColMatch = msg.match(/Could not find the '([^']+)' column/i) || msg.match(/column\s+([^\s]+)\s+of\s+'users'/i);
+      if (missingColMatch) {
+        const missingColumn = missingColMatch[1];
+        if (updateData.hasOwnProperty(missingColumn)) {
+          console.warn(`⚠️ Removendo coluna inexistente do update: ${missingColumn}`);
+          delete updateData[missingColumn];
+        } else {
+          console.warn('⚠️ Coluna inexistente não presente no updateData:', missingColumn);
+        }
+        if (Object.keys(updateData).length === 0) {
+          console.log('ℹ️ Nenhuma alteração após filtragem; respondendo sucesso.');
+          return res.json({ message: 'No changes', profile: req.user });
+        }
+      } else if (/invalid input syntax for type date/i.test(msg) && updateData.hasOwnProperty('birth_date')) {
+        console.warn('⚠️ Removendo birth_date inválido do update');
+        delete updateData['birth_date'];
+        if (Object.keys(updateData).length === 0) {
+          console.log('ℹ️ Nenhuma alteração após filtragem de birth_date; respondendo sucesso.');
+          return res.json({ message: 'No changes', profile: req.user });
+        }
+      } else {
+        // Erro diferente, sair do loop
+        break;
+      }
+
+      attempts++;
     }
 
-    console.log('✅ Profile updated successfully:', data);
-    res.json({ message: 'Profile updated successfully', profile: data });
+    if (lastError) {
+      const payloadError = { error: lastError.message, code: lastError.code, details: lastError?.details };
+      console.log('❌ Profile update failed:', payloadError);
+      return res.status(400).json(payloadError);
+    }
+
+    console.log('✅ Profile updated successfully:', result);
+    res.json({ message: 'Profile updated successfully', profile: result });
   } catch (error) {
     console.error('Update profile error:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -77,9 +135,15 @@ router.put('/profile', authenticateUser, async (req, res) => {
 router.get('/:userId/stats', authenticateUser, async (req, res) => {
   try {
     const { userId } = req.params;
+
+    // Resolver o userId (aceita tanto auth_id quanto ID da tabela users)
+    const resolvedUserId = await resolveUserId(userId);
+    if (!resolvedUserId) {
+      return res.status(404).json({ error: 'Usuário não encontrado' });
+    }
     
     // Verificar se o usuário pode acessar estes dados
-    if (req.user.id !== userId && !req.user.is_admin) {
+    if (req.user.id !== resolvedUserId && req.user.role !== 'admin') {
       return res.status(403).json({ error: 'Acesso negado' });
     }
 
@@ -87,13 +151,13 @@ router.get('/:userId/stats', authenticateUser, async (req, res) => {
     const { count: checkinsCount } = await supabase
       .from('checkins')
       .select('*', { count: 'exact', head: true })
-      .eq('user_id', userId);
+      .eq('user_id', resolvedUserId);
 
     // Get points
     const { data: pointsData } = await supabase
       .from('points')
       .select('amount')
-      .eq('user_id', userId);
+      .eq('user_id', resolvedUserId);
 
     const totalPoints = pointsData?.reduce((sum, point) => sum + point.amount, 0) || 0;
 
@@ -101,13 +165,13 @@ router.get('/:userId/stats', authenticateUser, async (req, res) => {
     const { count: badgesCount } = await supabase
       .from('badges')
       .select('*', { count: 'exact', head: true })
-      .eq('user_id', userId);
+      .eq('user_id', resolvedUserId);
 
     // Get AI conversations count
     const { count: aiConversationsCount } = await supabase
       .from('ai_conversations')
       .select('*', { count: 'exact', head: true })
-      .eq('user_id', userId);
+      .eq('user_id', resolvedUserId);
 
     const aiConversations = aiConversationsCount || 0;
 
@@ -124,25 +188,29 @@ router.get('/:userId/stats', authenticateUser, async (req, res) => {
 });
 
 // Get user ranking
-router.get('/ranking', authenticateUser, async (req, res) => {
+router.get('/ranking', optionalAuthenticateUser, async (req, res) => {
   try {
     const { scope = 'city', period = 'month' } = req.query;
-    const userId = req.user.id;
+    const userId = req.user?.id || null;
 
-    console.log('🏆 Ranking - Buscando ranking para usuário:', userId);
+    console.log('🏆 Ranking - Buscando ranking para usuário:', userId || 'anon');
 
-    // Get user's city for city-based ranking
-    const { data: userData } = await supabase
-      .from('users')
-      .select('city, state')
-      .eq('id', userId)
-      .single();
+    // Buscar cidade/estado do usuário apenas se autenticado
+    let userData = null;
+    if (userId) {
+      const { data: fetchedUser } = await supabase
+        .from('users')
+        .select('city, state')
+        .eq('id', userId)
+        .single();
+      userData = fetchedUser || null;
+    }
 
     let userQuery = supabase
       .from('users')
       .select('id, username, full_name, city, state, avatar_url');
 
-    // Apply scope filter
+    // Aplicar filtro por escopo somente se houver dados de localização
     if (scope === 'city' && userData?.city) {
       userQuery = userQuery.eq('city', userData.city);
     } else if (scope === 'state' && userData?.state) {
@@ -152,11 +220,11 @@ router.get('/ranking', authenticateUser, async (req, res) => {
     const { data: users, error: usersError } = await userQuery.limit(100);
 
     if (usersError) {
-      console.error('❌ Ranking - Erro ao buscar usuários:', usersError);
-      return res.status(400).json({ error: usersError.message });
+      console.warn('⚠️ Ranking - Erro ao buscar usuários, retornando fallback:', usersError?.message);
+      return res.status(200).json({ rankings: [], user_position: 0, scope, period, is_fallback: true });
     }
 
-    // Calculate points for each user from points table
+    // Somar pontos por usuário
     const userIds = users.map(user => user.id);
     const { data: pointsData, error: pointsError } = await supabase
       .from('points')
@@ -167,34 +235,28 @@ router.get('/ranking', authenticateUser, async (req, res) => {
       console.error('❌ Ranking - Erro ao buscar pontos:', pointsError);
     }
 
-    // Calculate total points for each user
     const userPoints = {};
     if (pointsData) {
       pointsData.forEach(point => {
-        if (!userPoints[point.user_id]) {
-          userPoints[point.user_id] = 0;
-        }
-        userPoints[point.user_id] += point.amount;
+        userPoints[point.user_id] = (userPoints[point.user_id] || 0) + point.amount;
       });
     }
 
-    // Add points to users and sort by points
     const rankings = users.map(user => ({
       ...user,
       points: userPoints[user.id] || 0
     })).sort((a, b) => b.points - a.points);
 
-    // Find user's position
-    const userPosition = rankings.findIndex(user => user.id === userId) + 1;
+    const userPosition = userId ? (rankings.findIndex(user => user.id === userId) + 1) : 0;
 
     console.log('🏆 Ranking - Rankings calculados:', rankings.length, 'usuários');
     console.log('🏆 Ranking - Posição do usuário:', userPosition);
 
     res.json({
       rankings,
-      user_position: userPosition || null,
+      user_position: userPosition,
       scope,
-      period,
+      period
     });
   } catch (error) {
     console.error('Get ranking error:', error);

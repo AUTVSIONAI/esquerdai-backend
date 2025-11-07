@@ -6,7 +6,7 @@
 -- Criar tabela points se não existir
 CREATE TABLE IF NOT EXISTS points (
     id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
-    user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+    user_id UUID NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
     amount INTEGER NOT NULL,
     reason TEXT NOT NULL,
     source VARCHAR(50) DEFAULT 'other',
@@ -43,7 +43,13 @@ ALTER TABLE points ENABLE ROW LEVEL SECURITY;
 
 -- Política para usuários verem apenas seus próprios pontos
 CREATE POLICY "Users can view own points" ON points
-    FOR SELECT USING (auth.uid() = user_id);
+    FOR SELECT USING (
+        EXISTS (
+            SELECT 1 FROM public.users u 
+            WHERE u.id = points.user_id 
+              AND u.auth_id = auth.uid()
+        )
+    );
 
 -- Política para admins verem todos os pontos
 CREATE POLICY "Admins can view all points" ON points
@@ -65,7 +71,7 @@ CREATE POLICY "System can update points" ON points
 
 -- Comentários para documentação
 COMMENT ON TABLE points IS 'Tabela para armazenar pontos de gamificação dos usuários';
-COMMENT ON COLUMN points.user_id IS 'ID do usuário (referência para auth.users)';
+COMMENT ON COLUMN points.user_id IS 'ID do usuário (referência para public.users)';
 COMMENT ON COLUMN points.amount IS 'Quantidade de pontos (pode ser negativa para deduções)';
 COMMENT ON COLUMN points.reason IS 'Motivo da concessão/dedução dos pontos';
 COMMENT ON COLUMN points.source IS 'Origem dos pontos (checkin, purchase, achievement, etc.)';

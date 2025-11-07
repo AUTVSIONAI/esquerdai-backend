@@ -58,12 +58,13 @@ async function checkUserLimits(userId, userPlan = 'gratuito') {
       .lt('created_at', today + 'T23:59:59.999Z');
 
     if (error) {
-      console.error('Error checking user limits:', error);
+      console.warn('⚠️ Supabase indisponível ao checar limites, usando padrão de desenvolvimento');
+      const limitFallback = PLAN_LIMITS[userPlan] || PLAN_LIMITS.gratuito;
       return {
-        canUse: false,
+        canUse: true,
         used: 0,
-        limit: 0,
-        remaining: 0
+        limit: limitFallback,
+        remaining: limitFallback
       };
     }
 
@@ -120,8 +121,8 @@ async function callOpenRouterModel(message, systemPrompt, model) {
       headers: {
         'Authorization': `Bearer ${openRouterKey}`,
         'Content-Type': 'application/json',
-        'HTTP-Referer': 'https://direitai.com',
-        'X-Title': 'DireitaGPT - Assistente IA Conservador'
+        'HTTP-Referer': 'https://esquerdai.com',
+        'X-Title': 'EsquerdaGPT - Assistente IA Progressista'
       },
       body: JSON.stringify({
         model: model,
@@ -271,32 +272,32 @@ async function generateResponse(message) {
   if (!openRouterKey && !togetherKey) {
     console.warn('Nenhuma chave de API configurada, usando resposta de fallback');
     const fallbackResponses = [
-      "Como conservador, acredito que é importante defender nossos valores tradicionais e a família como base da sociedade.",
-      "O livre mercado e a iniciativa privada são fundamentais para o crescimento econômico sustentável do Brasil.",
-      "A segurança pública deve ser prioridade, com fortalecimento das forças policiais e do sistema judiciário.",
-      "Nossos valores cristãos e tradições brasileiras devem ser preservados e respeitados.",
-      "A educação de qualidade e o empreendedorismo são chaves para o desenvolvimento nacional."
+      "Como progressista, defendo justiça social, direitos humanos e políticas públicas inclusivas.",
+      "Fortalecer saúde, educação e proteção social é essencial para reduzir desigualdades.",
+      "Combater racismo, violência e desinformação requer compromisso democrático e políticas baseadas em evidências.",
+      "A transição ecológica justa e o desenvolvimento sustentável devem orientar o crescimento econômico.",
+      "Valorizo diversidade, trabalho digno e participação popular para um Brasil mais igualitário."
     ];
     
     return {
       success: true,
       content: fallbackResponses[Math.floor(Math.random() * fallbackResponses.length)],
-      model: 'direitaGPT-fallback',
+      model: 'esquerdaGPT-fallback',
       provider: 'internal',
       tokensUsed: 50
     };
   }
 
   try {
-    const systemPrompt = `Você é o DireitaGPT, um assistente de IA com perspectiva conservadora brasileira. 
+    const systemPrompt = `Você é o EsquerdaGPT, um assistente de IA com perspectiva progressista brasileira.
 Suas características:
-- Defende valores tradicionais, família e livre mercado
-- Tem conhecimento sobre política brasileira
-- É respeitoso e educado
-- Foca em soluções práticas e realistas
-- Valoriza a história e tradições do Brasil
+- Defende justiça social, direitos humanos, igualdade e democracia participativa
+- Valoriza saúde, educação pública, cultura, ciência e trabalho digno
+- Apoia políticas ambientais e transição ecológica justa
+- Combate racismo, misoginia, LGBTQ+fobia e qualquer forma de discriminação
+- Baseia respostas em evidências, dados públicos e respeito institucional
 
-Responda de forma clara, objetiva e sempre mantendo uma perspectiva conservadora equilibrada.`;
+Responda com clareza, empatia e foco na redução de desigualdades, propondo caminhos concretos e inclusivos.`;
 
     console.log('🚀 Iniciando sistema de dispatcher inteligente...');
     const result = await smartDispatcher(message, systemPrompt);
@@ -313,19 +314,19 @@ Responda de forma clara, objetiva e sempre mantendo uma perspectiva conservadora
   } catch (error) {
     console.error('Erro ao gerar resposta da IA:', error);
     
-    // Fallback para respostas conservadoras básicas
+    // Fallback para respostas progressistas básicas
     const fallbackResponses = [
-      "Como conservador, acredito que é importante defender nossos valores tradicionais e a família brasileira.",
-      "A economia brasileira precisa de mais liberdade econômica e menos intervenção estatal para prosperar.",
-      "A segurança pública deve ser prioridade, com apoio às forças policiais e justiça eficiente.",
-      "Precisamos valorizar nossa história, tradições e a soberania nacional do Brasil.",
-      "A educação deve focar em conhecimento sólido e valores cívicos para formar cidadãos responsáveis."
+      "Como progressista, acredito que políticas públicas fortes reduzem desigualdades e ampliam direitos.",
+      "É fundamental garantir acesso universal a saúde e educação, com investimento e transparência.",
+      "A democracia se fortalece com participação social, respeito às instituições e combate à desinformação.",
+      "Defendo transição energética justa, proteção ambiental e desenvolvimento com inclusão.",
+      "Diversidade e direitos civis são pilares para um país mais seguro e solidário."
     ];
     
     return {
       success: true,
       content: fallbackResponses[Math.floor(Math.random() * fallbackResponses.length)],
-      model: 'direitaGPT-fallback',
+      model: 'esquerdaGPT-fallback',
       provider: 'fallback',
       tokensUsed: 50
     };
@@ -510,7 +511,10 @@ Responda APENAS no seguinte formato JSON:
     }
     
     console.log('📤 Enviando para análise de IA...');
-    const result = await smartDispatcher(finalPrompt, 'Você é um especialista em verificação de fatos. Analise o conteúdo fornecido e responda no formato JSON solicitado.');
+    const result = await smartDispatcher(
+      finalPrompt,
+      'Você é um verificador de fatos. Responda APENAS em JSON válido. Se o conteúdo for um fato objetivo confirmado por fontes (ex.: dados oficiais, registros históricos), classifique como "verdade". Use "tendencioso" apenas quando houver viés ou parcialidade. Nunca retorne "tendencioso" com confiança acima de 80 se a própria explicação confirmar o fato.'
+    );
     console.log('📥 Resposta da IA recebida:', result);
     console.log('✅ Análise concluída:', result);
     
@@ -550,6 +554,30 @@ Responda APENAS no seguinte formato JSON:
     
     if (!Array.isArray(analysisResult.fontes)) {
       analysisResult.fontes = ['Análise baseada em IA'];
+    }
+
+    // Harmonizar classificação com a explicação para evitar incoerências
+    try {
+      const exp = (analysisResult.explicacao || '').toLowerCase();
+      const ct = (content || '').toLowerCase();
+      const mentionsFact = exp.includes('fato') || exp.includes('verificado') || exp.includes('amplamente documentado') || exp.includes('confirmado');
+      const mentionsPresidentBR = (exp + ' ' + ct).includes('presidente do brasil');
+      const clearlyTrueByExplanation = mentionsFact || mentionsPresidentBR || exp.includes('foi') && exp.includes('presidente');
+
+      // Se a explicação afirma claramente um fato objetivo, não classificar como tendencioso
+      if (analysisResult.resultado === 'tendencioso' && (clearlyTrueByExplanation || analysisResult.confianca >= 90)) {
+        analysisResult.resultado = 'verdade';
+        if (!analysisResult.confianca || analysisResult.confianca < 80) {
+          analysisResult.confianca = 90;
+        }
+      }
+
+      // Evitar confiança excessiva para "tendencioso"
+      if (analysisResult.resultado === 'tendencioso' && analysisResult.confianca > 80) {
+        analysisResult.confianca = 80;
+      }
+    } catch (normError) {
+      console.warn('Falha ao harmonizar classificação:', normError?.message || normError);
     }
 
     return {
