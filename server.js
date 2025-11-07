@@ -49,6 +49,8 @@ const corsOptions = {
     'https://direitai-backend.vercel.app',
     'https://esquerdai.vercel.app',
     'https://esquerdai-backend.vercel.app',
+    'https://www.esquerdai.com',
+    'https://esquerdai.com',
     'http://localhost:5120',
     'http://localhost:5121',
     'http://localhost:5122',
