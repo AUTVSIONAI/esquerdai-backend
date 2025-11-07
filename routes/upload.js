@@ -45,8 +45,35 @@ function generateStoragePath(originalName, prefix) {
   return `${safePrefix}${uniqueSuffix}${extension}`;
 }
 
+// Helper: garantir que o bucket exista e seja público
+async function ensureBucketExists(bucketName) {
+  try {
+    const { data: bucket, error } = await supabase.storage.getBucket(bucketName);
+    if (bucket && bucket.name) return true;
+    // Se não encontrado, tentar criar
+    const { error: createErr } = await supabase.storage.createBucket(bucketName, {
+      public: true
+    });
+    if (createErr) {
+      console.warn('Falha ao criar bucket:', createErr.message);
+      return false;
+    }
+    console.log('Bucket criado com sucesso:', bucketName);
+    return true;
+  } catch (e) {
+    console.warn('Erro ao verificar/criar bucket:', e?.message || e);
+    return false;
+  }
+}
+
 // Helper: fazer upload para Supabase Storage
 async function uploadToSupabaseStorage(fileBuffer, contentType, originalName, prefix) {
+  // Garantir bucket existente
+  const ok = await ensureBucketExists(UPLOAD_BUCKET);
+  if (!ok) {
+    throw new Error('Bucket not found');
+  }
+
   const storagePath = generateStoragePath(originalName, prefix);
   const { data, error } = await supabase.storage
     .from(UPLOAD_BUCKET)
